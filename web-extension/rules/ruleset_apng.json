@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/icons/frozen.svg"
+      }
+    },
+    "condition": {
+      "regexFilter": "^https?://.*\\.apng(\\?.*)?$",
+      "resourceTypes": ["image"]
+    }
+  }
+]

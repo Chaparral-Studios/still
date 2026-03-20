@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Still</h1>
+    <div class="status" id="status"></div>
+    <div class="controls">
+      <label class="toggle">
+        <input type="checkbox" id="globalToggle">
+        <span class="slider"></span>
+        <span class="label">Enabled</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="siteToggle">
+        <span class="slider"></span>
+        <span class="label" id="siteLabel">Allow this site</span>
+      </label>
+    </div>
+    <div class="count" id="count"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

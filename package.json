@@ -1,0 +1,18 @@
+{
+  "name": "still",
+  "version": "1.0.0",
+  "description": "Freeze animated GIFs, WebP, and APNG images to their first frame",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "convert:ios": "xcrun safari-web-extension-converter web-extension/ --project-location Still/ --app-name Still --bundle-identifier com.jonbaker.still --ios-only --no-open",
+    "convert:macos": "xcrun safari-web-extension-converter web-extension/ --project-location StillMac/ --app-name Still --bundle-identifier com.jonbaker.still --macos-only --no-open",
+    "convert:all": "xcrun safari-web-extension-converter web-extension/ --project-location StillUniversal/ --app-name Still --bundle-identifier com.jonbaker.still --no-open"
+  },
+  "keywords": ["safari", "extension", "gif", "animation"],
+  "author": "Jon Baker",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

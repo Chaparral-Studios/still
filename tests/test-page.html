@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Still — Test Page</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .test-case { margin: 20px 0; padding: 10px; border: 1px solid #ddd; }
+    .test-case h3 { margin: 0 0 10px; }
+    img { max-width: 200px; display: block; margin: 5px 0; }
+    .bg-gif {
+      width: 200px;
+      height: 200px;
+      background-image: url('fixtures/animated.gif');
+      background-size: cover;
+    }
+  </style>
+</head>
+<body>
+  <h1>Still — Test Page</h1>
+
+  <div class="test-case" id="test-gif">
+    <h3>Animated GIF</h3>
+    <img src="fixtures/animated.gif" id="img-gif">
+  </div>
+
+  <div class="test-case" id="test-gif-query">
+    <h3>GIF with query string</h3>
+    <img src="fixtures/animated.gif?v=1" id="img-gif-query">
+  </div>
+
+  <div class="test-case" id="test-static">
+    <h3>Static PNG (should NOT be frozen)</h3>
+    <img src="fixtures/static.png" id="img-static">
+  </div>
+
+  <div class="test-case" id="test-bg">
+    <h3>Background-image GIF</h3>
+    <div class="bg-gif" id="div-bg-gif"></div>
+  </div>
+
+  <div class="test-case" id="test-data-uri">
+    <h3>Data URI GIF</h3>
+    <!-- Minimal 1x1 animated GIF as data URI -->
+    <img id="img-data-gif" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==">
+  </div>
+
+  <div class="test-case" id="test-dynamic">
+    <h3>Dynamically added (click button)</h3>
+    <button id="add-btn" onclick="addDynamic()">Add GIF</button>
+    <div id="dynamic-container"></div>
+  </div>
+
+  <script>
+    function addDynamic() {
+      const img = document.createElement('img');
+      img.src = 'fixtures/animated.gif';
+      img.id = 'img-dynamic';
+      document.getElementById('dynamic-container').appendChild(img);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <link rel="stylesheet" href="../Style.css">
+</head>
+<body>
+    <img src="../Icon.png" width="96" height="96" alt="Still Icon">
+    <h1>Still</h1>
+    <p class="subtitle">Freeze animated GIFs, WebP &amp; APNG</p>
+
+    <div class="instructions">
+        <h2>How to enable</h2>
+        <ol>
+            <li>Open <strong>Settings</strong></li>
+            <li>Scroll to <strong>Apps</strong> &gt; <strong>Safari</strong></li>
+            <li>Tap <strong>Extensions</strong></li>
+            <li>Enable <strong>Still</strong></li>
+            <li>Set permission to <strong>All Websites</strong></li>
+        </ol>
+    </div>
+
+    <button id="openSettings" onclick="openSettings()">Open Safari Settings</button>
+
+    <div class="info">
+        <p>Still freezes animated images to their first frame, reducing motion and saving battery.</p>
+        <p>Use the toolbar button in Safari to allow animations on specific sites.</p>
+    </div>
+
+    <script>
+        function openSettings() {
+            webkit.messageHandlers.controller.postMessage("openSettings");
+        }
+    </script>
+</body>
+</html>

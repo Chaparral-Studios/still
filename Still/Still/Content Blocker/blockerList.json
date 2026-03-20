@@ -1,0 +1,47 @@
+[
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*\\.gif",
+      "resource-type": ["raw"],
+      "load-type": ["third-party"]
+    }
+  },
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*ecm3.*\\.gif",
+      "resource-type": ["image"]
+    }
+  },
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*fls-na\\.amazon\\.com.*",
+      "resource-type": ["image"]
+    }
+  },
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*\\.cloudfront\\.net/e/.*\\.gif",
+      "resource-type": ["image"],
+      "load-type": ["third-party"]
+    }
+  },
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*pixel\\..*\\.gif",
+      "resource-type": ["image"],
+      "load-type": ["third-party"]
+    }
+  },
+  {
+    "action": { "type": "block" },
+    "trigger": {
+      "url-filter": ".*\\.openx\\.net/.*\\.gif",
+      "resource-type": ["image"]
+    }
+  }
+]
