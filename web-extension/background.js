@@ -16,21 +16,58 @@ const frozenCounts = new Map();
 // 1x1 transparent PNG as a data URI — used as redirect target
 const TRANSPARENT_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQABNjN9GQAAAAlwSFlzAAAWJQAAFiUBSVIk8AAAAA0lEQVQI12P4z8BQDwAEgAF/QualzQAAAABJRU5ErkJggg==';
 
+// --- Helpers: handle both Promise (Safari) and callback (Chrome) APIs ---
+
+function storageGet(keys) {
+  return new Promise((resolve) => {
+    try {
+      const result = api.storage.local.get(keys, (r) => resolve(r));
+      if (result && typeof result.then === 'function') {
+        result.then(resolve);
+      }
+    } catch (e) {
+      resolve({});
+    }
+  });
+}
+
+function storageSet(data) {
+  return new Promise((resolve) => {
+    try {
+      const result = api.storage.local.set(data, () => resolve());
+      if (result && typeof result.then === 'function') {
+        result.then(resolve);
+      }
+    } catch (e) {
+      resolve();
+    }
+  });
+}
+
+function safeSendMessage(tabId, msg) {
+  try {
+    const result = api.tabs.sendMessage(tabId, msg);
+    if (result && typeof result.then === 'function') {
+      result.catch(() => {});
+    }
+  } catch (e) {}
+}
+
 // --- Initialize default state ---
 api.runtime.onInstalled.addListener(() => {
-  api.storage.local.get(['enabled', 'allowlist'], (result) => {
+  storageGet(['enabled', 'allowlist']).then((result) => {
     if (result.enabled === undefined) {
-      api.storage.local.set({ enabled: true });
+      storageSet({ enabled: true });
     }
     if (!result.allowlist) {
-      api.storage.local.set({ allowlist: [] });
+      storageSet({ allowlist: [] });
     }
   });
 });
 
 // --- webRequest: intercept Content-Type headers (Chrome/Firefox) ---
 // Safari MV3 does not support webRequest, so this is a progressive
-// enhancement. The content script's frame-comparison probing is the
+// enhancement. The content script's HEAD-request probing is the
 // fallback for Safari.
 
 function setupWebRequestInterceptor() {
@@ -60,18 +97,15 @@ function setupWebRequestInterceptor() {
     const tabId = details.tabId;
 
     // Notify the content script about this animated URL so it can
-    // freeze immediately instead of waiting for the frame-comparison probe
+    // replace immediately instead of waiting for the HEAD-request probe
     if (tabId > 0) {
-      api.tabs.sendMessage(tabId, {
-        type: 'animatedURL',
-        url: details.url
-      }).catch(() => {});
+      safeSendMessage(tabId, { type: 'animatedURL', url: details.url });
     }
 
     // On Firefox (MV3 supports blocking webRequest), redirect to
     // transparent PNG to prevent animated bytes from rendering.
     // On Chrome MV3 this return value is silently ignored — the
-    // content script's preemptive-hide + freeze handles it instead.
+    // content script's preemptive-hide + replace handles it instead.
     return { redirectUrl: TRANSPARENT_PNG };
   };
 
@@ -106,7 +140,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'getState') {
-    api.storage.local.get(['enabled', 'allowlist'], (result) => {
+    storageGet(['enabled', 'allowlist']).then((result) => {
       const host = msg.host || '';
       const allowlist = result.allowlist || [];
       sendResponse({
@@ -119,7 +153,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'toggleSite') {
-    api.storage.local.get(['allowlist'], (result) => {
+    storageGet(['allowlist']).then((result) => {
       const allowlist = result.allowlist || [];
       const host = msg.host;
       const idx = allowlist.indexOf(host);
@@ -128,7 +162,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else {
         allowlist.splice(idx, 1);
       }
-      api.storage.local.set({ allowlist }, () => {
+      storageSet({ allowlist }).then(() => {
         notifyContentScript(msg.tabId);
         sendResponse({ allowlist });
       });
@@ -137,9 +171,9 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'toggleEnabled') {
-    api.storage.local.get(['enabled'], (result) => {
+    storageGet(['enabled']).then((result) => {
       const newState = !(result.enabled !== false);
-      api.storage.local.set({ enabled: newState }, () => {
+      storageSet({ enabled: newState }).then(() => {
         notifyContentScript(msg.tabId);
         sendResponse({ enabled: newState });
       });
@@ -150,15 +184,17 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 function notifyContentScript(tabId) {
   if (tabId) {
-    api.tabs.sendMessage(tabId, { type: 'stateChanged' }).catch(() => {});
+    safeSendMessage(tabId, { type: 'stateChanged' });
   }
 }
 
 function updateBadge(tabId, count) {
   const text = count > 0 ? String(count) : '';
   if (api.action) {
-    api.action.setBadgeText({ text, tabId });
-    api.action.setBadgeBackgroundColor({ color: '#4A90D9', tabId });
+    try {
+      api.action.setBadgeText({ text, tabId });
+      api.action.setBadgeBackgroundColor({ color: '#4A90D9', tabId });
+    } catch (e) {}
   }
 }
 

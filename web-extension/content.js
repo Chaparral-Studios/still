@@ -1,50 +1,88 @@
 /* Still — content script
-   Hybrid approach:
-   1. declarativeNetRequest blocks .gif URLs at network level (prevents cache re-trigger)
-   2. Content script freezes ALL animated images (including extensionless CDN URLs)
-      by capturing first frame to canvas and replacing src with static PNG
-   3. lockImage() overrides img.src setter to prevent page JS from swapping back
-   4. Pauses autoplay <video> elements
-   5. Cancels CSS animations */
+   Blocks animated images, replacing them with a static placeholder.
+
+   Strategy:
+   1. declarativeNetRequest blocks .gif URLs at network level (always animated)
+   2. .webp/.apng — fetched partially to check for animation markers before replacing
+   3. Extensionless URLs — HEAD request to check content-type
+   4. lockImage() overrides img.src setter to prevent page JS from swapping back
+   5. Cancels CSS animations
+   Note: video elements are left to other extensions (e.g. StopTheMadness Pro) */
 
 (function () {
   'use strict';
 
-  const ANIMATED_EXT_RE = /\.(gif|webp|apng)(\?|$)/i;
+  const GIF_EXT_RE = /\.gif(\?|$)/i;
+  const MAYBE_ANIMATED_EXT_RE = /\.(webp|apng)(\?|$)/i;
   const DATA_GIF_RE = /^data:image\/gif[;,]/i;
   const STATIC_EXT_RE = /\.(jpe?g|png|svg|bmp|ico|avif)(\?|$)/i;
   let enabled = true;
   let siteAllowed = false;
 
-  const frozenCache = new Map();
+  // Inline SVG placeholder — pause icon on light gray background
+  const PLACEHOLDER = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23e8e8e8' rx='4'/%3E%3Crect x='35' y='25' width='8' height='50' fill='%23bbb' rx='2'/%3E%3Crect x='57' y='25' width='8' height='50' fill='%23bbb' rx='2'/%3E%3C/svg%3E";
+
+  const replacedURLs = new Set();
   const flaggedAnimatedURLs = new Set();
 
-  // --- Early CSS: hide animated and extensionless images until processed ---
+  // --- CSS: hide potentially-animated images while checking; stabilize replaced images ---
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
+    // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
     'img[src$=".apng"], img[src*=".apng?"]',
     '{ visibility: hidden !important; }',
-    'img[data-still="probing"] { visibility: hidden !important; }',
-    'img[data-still="freezing"] { visibility: hidden !important; }'
+    'img[data-still="replacing"] { visibility: hidden !important; }',
+    // Once confirmed static, unhide (set by JS via data-still="static")
+    'img[data-still="static"] { visibility: visible !important; }',
+    // Keep replaced images visually stable even if page JS briefly changes src
+    'img[data-still="replaced"] {',
+    '  visibility: visible !important;',
+    "  background: #e8e8e8 url(\"" + PLACEHOLDER + "\") center/contain no-repeat !important;",
+    '  object-position: -9999px -9999px !important;',
+    '}'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
 
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
+  // --- Helpers: wrap callback APIs to handle both Promise (Safari) and callback (Chrome) ---
+
+  function storageGet(keys) {
+    return new Promise((resolve) => {
+      try {
+        const result = api.storage.local.get(keys, (r) => resolve(r));
+        if (result && typeof result.then === 'function') {
+          result.then(resolve);
+        }
+      } catch (e) {
+        resolve({});
+      }
+    });
+  }
+
+  function sendMsg(msg) {
+    try {
+      const result = api.runtime.sendMessage(msg);
+      if (result && typeof result.then === 'function') {
+        result.catch(() => {});
+      }
+    } catch (e) {}
+  }
+
   // --- State ---
 
   function checkState() {
-    api.storage.local.get(['enabled', 'allowlist'], (result) => {
+    storageGet(['enabled', 'allowlist']).then((result) => {
       enabled = result.enabled !== false;
       const allowlist = result.allowlist || [];
       siteAllowed = allowlist.includes(location.hostname);
 
       if (!enabled || siteAllowed) {
         style.remove();
-        document.querySelectorAll('img[data-still="probing"], img[data-still="freezing"]').forEach((img) => {
+        document.querySelectorAll('img[data-still="replacing"]').forEach((img) => {
           img.dataset.still = '';
           img.style.visibility = '';
         });
@@ -60,8 +98,8 @@
       flaggedAnimatedURLs.add(msg.url);
       document.querySelectorAll('img').forEach((img) => {
         const src = img.currentSrc || img.src;
-        if (src === msg.url && img.dataset.still !== 'frozen') {
-          freezeViaFetch(img, msg.url);
+        if (src === msg.url && img.dataset.still !== 'replaced') {
+          replaceWithPlaceholder(img);
         }
       });
     }
@@ -69,10 +107,15 @@
 
   // --- URL helpers ---
 
-  function hasAnimatedExtension(src) {
+  function isDefinitelyAnimated(src) {
     if (!src) return false;
     if (DATA_GIF_RE.test(src)) return true;
-    return ANIMATED_EXT_RE.test(src);
+    return GIF_EXT_RE.test(src);
+  }
+
+  function isMaybeAnimated(src) {
+    if (!src) return false;
+    return MAYBE_ANIMATED_EXT_RE.test(src);
   }
 
   function hasStaticExtension(src) {
@@ -83,87 +126,22 @@
   function isExtensionless(src) {
     if (!src) return false;
     if (src.startsWith('data:')) return false;
-    return !ANIMATED_EXT_RE.test(src) && !STATIC_EXT_RE.test(src);
+    return !GIF_EXT_RE.test(src) && !MAYBE_ANIMATED_EXT_RE.test(src) && !STATIC_EXT_RE.test(src);
   }
 
-  // --- Freeze: canvas approach (same-origin) ---
+  // --- Replace image with placeholder ---
 
-  function freezeViaCanvas(img) {
+  function replaceWithPlaceholder(img) {
     const originalSrc = img.currentSrc || img.src;
+    replacedURLs.add(originalSrc);
 
-    const cached = frozenCache.get(originalSrc);
-    if (cached) {
-      applyFrozenSrc(img, cached);
-      return true;
-    }
-
-    const w = img.naturalWidth;
-    const h = img.naturalHeight;
-    if (!w || !h) return false;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-
-    try {
-      ctx.drawImage(img, 0, 0);
-      canvas.toDataURL(); // taint check
-    } catch (e) {
-      // Cross-origin — fall back to fetch
-      freezeViaFetch(img, originalSrc);
-      return false;
-    }
-
-    const dataURL = canvas.toDataURL('image/png');
-    frozenCache.set(originalSrc, dataURL);
-    applyFrozenSrc(img, dataURL);
-    return true;
-  }
-
-  // --- Freeze: fetch approach (cross-origin + extensionless) ---
-
-  function freezeViaFetch(img, url) {
-    if (!url || img.dataset.still === 'frozen') return;
-
-    const cached = frozenCache.get(url);
-    if (cached) {
-      applyFrozenSrc(img, cached);
-      return;
-    }
-
-    img.dataset.still = 'freezing';
-
-    fetch(url, { credentials: 'omit' })
-      .then((res) => res.blob())
-      .then((blob) => createImageBitmap(blob))
-      .then((bitmap) => {
-        const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap, 0, 0);
-
-        const dataURL = canvas.toDataURL('image/png');
-        frozenCache.set(url, dataURL);
-        applyFrozenSrc(img, dataURL);
-      })
-      .catch(() => {
-        img.dataset.still = 'skipped';
-        img.style.visibility = '';
-      });
-  }
-
-  // --- Apply frozen src + lock ---
-
-  function applyFrozenSrc(img, dataURL) {
     clearPictureSources(img);
     if (img.srcset) img.srcset = '';
-    img.src = dataURL;
-    img.dataset.still = 'frozen';
+    img.src = PLACEHOLDER;
+    img.dataset.still = 'replaced';
     img.style.visibility = '';
     lockImage(img);
-    api.runtime.sendMessage({ type: 'imageFrozen' }).catch(() => {});
+    sendMsg({ type: 'imageFrozen' });
   }
 
   function clearPictureSources(img) {
@@ -186,55 +164,28 @@
         return descriptor.get.call(this);
       },
       set(val) {
-        // Page JS trying to set a URL we've already frozen — substitute cached PNG
-        if (val && !val.startsWith('data:') && frozenCache.has(val)) {
-          descriptor.set.call(this, frozenCache.get(val));
-          return;
-        }
-        // New animated URL we haven't seen — allow load, then re-freeze
-        if (val && !val.startsWith('data:') && (hasAnimatedExtension(val) || isExtensionless(val))) {
-          this.dataset.still = '';
-          this.__stillLocked = false;
+        if (val === PLACEHOLDER) {
           descriptor.set.call(this, val);
-          this.addEventListener('load', () => processImage(this), { once: true });
-          return;
         }
-        descriptor.set.call(this, val);
+        // Everything else is silently dropped
       },
       configurable: true
     });
-  }
 
-  // --- Header sniffing for extensionless URLs ---
-
-  function detectAnimationByHeader(url) {
-    return fetch(url, { method: 'GET', credentials: 'omit' })
-      .then((res) => {
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        if (ct.includes('image/gif')) {
-          return res.arrayBuffer().then((buf) => isAnimatedGifBuffer(new Uint8Array(buf)));
-        }
-        if (ct.includes('image/webp') || ct.includes('image/apng') || ct.includes('image/png')) {
-          return res.arrayBuffer().then((buf) => {
-            const bytes = new Uint8Array(buf);
-            if (ct.includes('image/webp')) return isAnimatedWebPBuffer(bytes);
-            return isAnimatedPNGBuffer(bytes);
-          });
-        }
-        return false;
-      })
-      .catch(() => false);
-  }
-
-  function isAnimatedGifBuffer(bytes) {
-    let blocks = 0;
-    for (let i = 0; i < bytes.length - 1; i++) {
-      if (bytes[i] === 0x2C) { blocks++; if (blocks > 1) return true; }
+    const srcsetDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'srcset');
+    if (srcsetDescriptor) {
+      Object.defineProperty(img, 'srcset', {
+        get() { return srcsetDescriptor.get.call(this); },
+        set() { /* drop */ },
+        configurable: true
+      });
     }
-    return false;
   }
+
+  // --- Animation detection for WebP/APNG (partial fetch) ---
 
   function isAnimatedWebPBuffer(bytes) {
+    // Look for ANMF chunk which indicates animation
     for (let i = 0; i < bytes.length - 4; i++) {
       if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x4D && bytes[i+3] === 0x46) return true;
     }
@@ -242,32 +193,71 @@
   }
 
   function isAnimatedPNGBuffer(bytes) {
+    // Look for acTL chunk which indicates APNG animation
     for (let i = 0; i < bytes.length - 4; i++) {
       if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4C) return true;
     }
     return false;
   }
 
+  function checkAnimationByPartialFetch(url) {
+    // Fetch first 4KB — enough to find ANMF (WebP) or acTL (APNG) markers
+    return fetch(url, {
+      credentials: 'omit',
+      headers: { 'Range': 'bytes=0-4095' }
+    })
+      .then((res) => res.arrayBuffer())
+      .then((buf) => {
+        const bytes = new Uint8Array(buf);
+        if (url.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
+        if (url.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
+        // Check both if unclear
+        return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
+      })
+      .catch(() => false);
+  }
+
+  // --- Detect animation for extensionless URLs ---
+  // Two-step: HEAD to get content-type, then partial fetch if needed
+
+  function detectAnimationForExtensionless(url) {
+    return fetch(url, { method: 'HEAD', credentials: 'omit' })
+      .then((res) => {
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        // GIF is always animated
+        if (ct.includes('image/gif')) return true;
+        // Static formats — definitely not animated
+        if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
+            ct.includes('image/bmp') || ct.includes('image/avif')) return false;
+        // WebP/APNG could be either — need to check the bytes
+        if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) {
+          return fetch(url, {
+            credentials: 'omit',
+            headers: { 'Range': 'bytes=0-4095' }
+          })
+            .then((res2) => res2.arrayBuffer())
+            .then((buf) => {
+              const bytes = new Uint8Array(buf);
+              return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
+            });
+        }
+        return false;
+      })
+      .catch(() => false);
+  }
+
   // --- Process each image ---
 
   function processImage(img) {
     if (!enabled || siteAllowed) return;
-    if (img.dataset.still === 'frozen' || img.dataset.still === 'freezing') return;
+    if (img.dataset.still === 'replaced' || img.dataset.still === 'replacing') return;
 
     const src = img.currentSrc || img.src;
 
-    // --- Path A: known animated extension — freeze via canvas ---
-    if (hasAnimatedExtension(src)) {
-      img.dataset.still = 'freezing';
-      if (img.complete && img.naturalWidth) {
-        freezeViaCanvas(img);
-      } else {
-        img.addEventListener('load', () => freezeViaCanvas(img), { once: true });
-        img.addEventListener('error', () => {
-          img.dataset.still = 'error';
-          img.style.visibility = '';
-        }, { once: true });
-      }
+    // --- Path A: .gif or data:image/gif — replace immediately (always animated) ---
+    if (isDefinitelyAnimated(src)) {
+      img.dataset.still = 'replacing';
+      replaceWithPlaceholder(img);
       return;
     }
 
@@ -276,86 +266,41 @@
 
     // --- Path C: flagged by webRequest header inspection ---
     if (flaggedAnimatedURLs.has(src)) {
-      img.dataset.still = 'freezing';
-      freezeViaFetch(img, src);
+      img.dataset.still = 'replacing';
+      replaceWithPlaceholder(img);
       return;
     }
 
-    // --- Path D: extensionless URL — hide, probe, freeze if animated ---
-    if (isExtensionless(src)) {
-      if (img.dataset.still === 'probing') return;
+    // --- Path D: .webp/.apng — check if actually animated (most aren't) ---
+    if (isMaybeAnimated(src)) {
+      if (img.dataset.still === 'probing' || img.dataset.still === 'static') return;
       img.dataset.still = 'probing';
 
-      function probe() {
-        // Try canvas frame comparison first (fast, same-origin)
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        if (!w || !h) { unhide(img); return; }
-
-        const scale = Math.min(1, 100 / Math.max(w, h));
-        const cw = Math.max(1, Math.round(w * scale));
-        const ch = Math.max(1, Math.round(h * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = cw;
-        canvas.height = ch;
-        const ctx = canvas.getContext('2d');
-
-        try {
-          ctx.drawImage(img, 0, 0, cw, ch);
-          const frame1 = ctx.getImageData(0, 0, cw, ch).data;
-
-          setTimeout(() => {
-            try {
-              ctx.clearRect(0, 0, cw, ch);
-              ctx.drawImage(img, 0, 0, cw, ch);
-              const frame2 = ctx.getImageData(0, 0, cw, ch).data;
-
-              let differs = false;
-              for (let i = 0; i < frame1.length; i++) {
-                if (frame1[i] !== frame2[i]) { differs = true; break; }
-              }
-
-              if (differs) {
-                freezeViaCanvas(img);
-              } else {
-                unhide(img);
-              }
-            } catch (e) {
-              // Tainted — fall back to header sniff
-              headerProbe();
-            }
-          }, 120);
-        } catch (e) {
-          // Tainted — fall back to header sniff
-          headerProbe();
+      checkAnimationByPartialFetch(src).then((animated) => {
+        if (animated) {
+          replaceWithPlaceholder(img);
+        } else {
+          img.dataset.still = 'static';
         }
-
-        function headerProbe() {
-          detectAnimationByHeader(src).then((animated) => {
-            if (animated) {
-              freezeViaFetch(img, src);
-            } else {
-              unhide(img);
-            }
-          });
-        }
-      }
-
-      if (img.complete && img.naturalWidth) {
-        probe();
-      } else {
-        img.addEventListener('load', probe, { once: true });
-        img.addEventListener('error', () => {
-          img.dataset.still = 'error';
-          img.style.visibility = '';
-        }, { once: true });
-      }
+      });
+      return;
     }
-  }
 
-  function unhide(img) {
-    img.dataset.still = 'static';
-    img.style.visibility = '';
+    // --- Path E: extensionless URL — hide, then HEAD + partial fetch to check ---
+    if (isExtensionless(src)) {
+      if (img.dataset.still === 'probing' || img.dataset.still === 'static') return;
+      img.dataset.still = 'probing';
+      img.style.visibility = 'hidden';
+
+      detectAnimationForExtensionless(src).then((animated) => {
+        if (animated) {
+          replaceWithPlaceholder(img);
+        } else {
+          img.dataset.still = 'static';
+          img.style.visibility = '';
+        }
+      });
+    }
   }
 
   // --- Scanning ---
@@ -394,24 +339,27 @@
           }
         } else if (mutation.type === 'attributes') {
           const target = mutation.target;
-          if (target.tagName === 'IMG' && target.dataset.still !== 'frozen') {
+          // Skip already-replaced images — the lock and CSS handle them
+          if (target.tagName === 'IMG' && target.dataset.still === 'replaced') {
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+            if (descriptor) {
+              const currentSrc = descriptor.get.call(target);
+              if (currentSrc !== PLACEHOLDER) {
+                descriptor.set.call(target, PLACEHOLDER);
+              }
+            }
+            continue;
+          }
+          if (target.tagName === 'IMG' && target.dataset.still !== 'probing' && target.dataset.still !== 'static') {
             target.dataset.still = '';
             processImage(target);
           }
-          // Re-clear <source> if page JS restores it on a frozen <picture>
+          // Re-clear <source> if page JS restores it on a replaced <picture>
           if (target.tagName === 'SOURCE' && target.parentElement?.tagName === 'PICTURE') {
-            const frozenImg = target.parentElement.querySelector('img[data-still="frozen"]');
-            if (frozenImg) {
+            const replacedImg = target.parentElement.querySelector('img[data-still="replaced"]');
+            if (replacedImg) {
               target.removeAttribute('srcset');
               target.removeAttribute('src');
-            }
-          }
-          // Catch page JS swapping a frozen img back to animated URL
-          if (target.tagName === 'IMG' && target.dataset.still === 'frozen') {
-            const src = target.currentSrc || target.src;
-            if (!src.startsWith('data:')) {
-              target.dataset.still = '';
-              processImage(target);
             }
           }
         }
@@ -425,22 +373,6 @@
       attributes: true,
       attributeFilter: ['src', 'srcset']
     });
-  }
-
-  // --- Video autoplay suppression ---
-
-  const pausedVideos = new WeakSet();
-
-  function suppressVideoAutoplay() {
-    document.addEventListener('play', (e) => {
-      if (!enabled || siteAllowed) return;
-      if (e.target.tagName === 'VIDEO' && !e.target.paused) {
-        if (!pausedVideos.has(e.target)) {
-          pausedVideos.add(e.target);
-          e.target.pause();
-        }
-      }
-    }, true);
   }
 
   // --- CSS animation cancellation ---
@@ -463,7 +395,6 @@
 
     scanAll();
     observeMutations();
-    suppressVideoAutoplay();
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => { scanAll(); cancelAnimations(); });
@@ -472,14 +403,13 @@
     }
 
     window.addEventListener('load', scanAll);
-    setTimeout(() => style.remove(), 500);
   }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
     window.__still = {
-      processImage, freezeViaCanvas, freezeViaFetch, frozenCache,
-      hasAnimatedExtension, hasStaticExtension, isExtensionless,
+      processImage, replaceWithPlaceholder, replacedURLs,
+      isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless,
       scanAll, flaggedAnimatedURLs
     };
   }

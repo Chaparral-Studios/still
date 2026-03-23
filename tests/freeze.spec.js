@@ -79,36 +79,38 @@ async function injectContentScript(page) {
   });
 }
 
-test.describe('Still — freeze logic', () => {
-  test('freezes animated GIF via fetchAndFreeze', async ({ page }) => {
+const PLACEHOLDER_PREFIX = "data:image/svg+xml,";
+
+test.describe('Still — block and replace logic', () => {
+  test('replaces animated GIF with placeholder', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-gif');
-      return img && img.dataset.still === 'frozen';
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
 
     const src = await page.$eval('#img-gif', el => el.src);
-    expect(src).toMatch(/^data:image\/png;base64,/);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
-  test('freezes GIF with query string', async ({ page }) => {
+  test('replaces GIF with query string', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-gif-query');
-      return img && img.dataset.still === 'frozen';
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
 
     const src = await page.$eval('#img-gif-query', el => el.src);
-    expect(src).toMatch(/^data:image\/png;base64,/);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
-  test('does NOT freeze static PNG images', async ({ page }) => {
+  test('does NOT replace static PNG images', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
@@ -119,21 +121,21 @@ test.describe('Still — freeze logic', () => {
     expect(src).toMatch(/static\.png$/);
   });
 
-  test('freezes data URI GIF', async ({ page }) => {
+  test('replaces data URI GIF with placeholder', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-data-gif');
-      return img && img.dataset.still === 'frozen';
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
 
     const src = await page.$eval('#img-data-gif', el => el.src);
-    expect(src).toMatch(/^data:image\/png;base64,/);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
-  test('freezes dynamically added GIF via MutationObserver', async ({ page }) => {
+  test('replaces dynamically added GIF via MutationObserver', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
@@ -143,7 +145,7 @@ test.describe('Still — freeze logic', () => {
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-dynamic');
-      return img && (img.dataset.still === 'frozen' || img.dataset.still === 'skipped');
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
   });
 
@@ -153,22 +155,24 @@ test.describe('Still — freeze logic', () => {
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
     const results = await page.evaluate(() => {
-      const { hasAnimatedExtension, hasStaticExtension, isExtensionless } = window.__still;
+      const { isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless } = window.__still;
       return {
-        gif: hasAnimatedExtension('https://example.com/image.gif'),
-        gifQuery: hasAnimatedExtension('https://example.com/image.gif?v=2'),
-        webp: hasAnimatedExtension('https://example.com/anim.webp'),
-        apng: hasAnimatedExtension('https://example.com/anim.apng'),
-        dataGif: hasAnimatedExtension('data:image/gif;base64,R0lGOD'),
+        gif: isDefinitelyAnimated('https://example.com/image.gif'),
+        gifQuery: isDefinitelyAnimated('https://example.com/image.gif?v=2'),
+        webp: isMaybeAnimated('https://example.com/anim.webp'),
+        apng: isMaybeAnimated('https://example.com/anim.apng'),
+        dataGif: isDefinitelyAnimated('data:image/gif;base64,R0lGOD'),
         png: hasStaticExtension('https://example.com/photo.png'),
         jpg: hasStaticExtension('https://example.com/photo.jpg'),
         svg: hasStaticExtension('https://example.com/icon.svg'),
         cdnUrl: isExtensionless('https://images.wsj.net/im-59533137?size=1&width=74'),
         cdnPath: isExtensionless('https://cdn.example.com/images/12345'),
-        emptyAnimated: hasAnimatedExtension(''),
-        nullAnimated: hasAnimatedExtension(null),
+        emptyDefinite: isDefinitelyAnimated(''),
+        nullDefinite: isDefinitelyAnimated(null),
         emptyExtless: isExtensionless(''),
         dataUriExtless: isExtensionless('data:image/gif;base64,R0lGOD'),
+        // WebP/APNG should NOT be classified as "definitely animated"
+        webpNotDefinite: isDefinitelyAnimated('https://example.com/photo.webp'),
       };
     });
 
@@ -182,13 +186,14 @@ test.describe('Still — freeze logic', () => {
     expect(results.svg).toBe(true);
     expect(results.cdnUrl).toBe(true);
     expect(results.cdnPath).toBe(true);
-    expect(results.emptyAnimated).toBe(false);
-    expect(results.nullAnimated).toBe(false);
+    expect(results.emptyDefinite).toBe(false);
+    expect(results.nullDefinite).toBe(false);
     expect(results.emptyExtless).toBe(false);
     expect(results.dataUriExtless).toBe(false);
+    expect(results.webpNotDefinite).toBe(false);
   });
 
-  test('detects and freezes extensionless animated GIF via header sniff', async ({ page }) => {
+  test('detects and replaces extensionless animated GIF via header sniff', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
 
@@ -203,15 +208,15 @@ test.describe('Still — freeze logic', () => {
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-extensionless');
-      return img && (img.dataset.still === 'frozen' || img.dataset.still === 'static');
+      return img && (img.dataset.still === 'replaced' || img.dataset.still === 'static');
     }, { timeout: 5000 });
 
-    expect(['frozen', 'static']).toContain(
+    expect(['replaced', 'static']).toContain(
       await page.$eval('#img-extensionless', el => el.dataset.still)
     );
   });
 
-  test('freezes cross-origin extensionless GIF via header sniff', async ({ page }) => {
+  test('replaces cross-origin extensionless GIF via header sniff', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
 
@@ -226,27 +231,27 @@ test.describe('Still — freeze logic', () => {
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-cross-origin');
-      return img && (img.dataset.still === 'frozen' || img.dataset.still === 'static' || img.dataset.still === 'skipped');
+      return img && (img.dataset.still === 'replaced' || img.dataset.still === 'static');
     }, { timeout: 10000 });
 
-    expect(['frozen', 'static']).toContain(
+    expect(['replaced', 'static']).toContain(
       await page.$eval('#img-cross-origin', el => el.dataset.still)
     );
   });
 
-  test('uses cache for repeated freeze of same URL', async ({ page }) => {
+  test('tracks replaced URLs', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
-    // Wait for first freeze
+    // Wait for first replacement
     await page.waitForFunction(() => {
       const img = document.getElementById('img-gif');
-      return img && img.dataset.still === 'frozen';
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
 
-    // Check cache has an entry
-    const cacheSize = await page.evaluate(() => window.__still.frozenCache.size);
-    expect(cacheSize).toBeGreaterThan(0);
+    // Check replacedURLs has entries
+    const size = await page.evaluate(() => window.__still.replacedURLs.size);
+    expect(size).toBeGreaterThan(0);
   });
 });
