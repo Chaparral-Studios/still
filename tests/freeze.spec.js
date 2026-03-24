@@ -372,4 +372,35 @@ test.describe('Still — block and replace logic', () => {
     const animateCount = await page.evaluate(() => document.querySelectorAll('animate').length);
     expect(animateCount).toBe(0);
   });
+
+  test('kills CSS transitions so style changes are instant (Amazon carousel pattern)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/fixtures/test-transitions.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // Wait for the stylesheet to be injected
+    await page.waitForFunction(() => !!document.getElementById('__still-hide'));
+
+    // Verify transition-duration is forced to 0s on all elements
+    const htmlTransition = await page.evaluate(() => getComputedStyle(document.documentElement).transitionDuration);
+    expect(htmlTransition).toBe('0s');
+
+    const slideTransition = await page.evaluate(() => getComputedStyle(document.getElementById('slide-a')).transitionDuration);
+    expect(slideTransition).toBe('0s');
+
+    const fadeTransition = await page.evaluate(() => getComputedStyle(document.getElementById('fade-box')).transitionDuration);
+    expect(fadeTransition).toBe('0s');
+
+    // Now test that changes are actually instant:
+    // Trigger an opacity change and verify it takes effect immediately (no gradual transition)
+    const isInstant = await page.evaluate(() => {
+      const box = document.getElementById('fade-box');
+      box.style.opacity = '0.1';
+      // Read immediately — if transitions are killed, opacity is already 0.1
+      // If transitions were active, it would still be close to the old value
+      const immediate = parseFloat(getComputedStyle(box).opacity);
+      return Math.abs(immediate - 0.1) < 0.01;
+    });
+    expect(isInstant).toBe(true);
+  });
 });

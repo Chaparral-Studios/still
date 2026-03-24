@@ -25,10 +25,13 @@
   const replacedURLs = new Set();
   const flaggedAnimatedURLs = new Set();
 
-  // --- CSS: hide potentially-animated images while checking; stabilize replaced images ---
+  // --- CSS: hide potentially-animated images while checking; stabilize replaced images;
+  //         kill all transitions to prevent smooth/subliminal motion ---
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
+    // Kill all CSS transitions — prevents smooth crossfades, carousel glides, etc.
+    '*, *::before, *::after { transition-duration: 0s !important; }',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
@@ -386,12 +389,21 @@
     });
   }
 
+  // --- Pause all videos ---
+
+  function pauseVideos() {
+    document.querySelectorAll('video').forEach((v) => {
+      try { v.pause(); } catch (e) {}
+    });
+  }
+
   // --- Scanning ---
 
   function scanAll() {
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();
+    pauseVideos();
   }
 
   // --- MutationObserver ---
@@ -416,8 +428,11 @@
             if (node.nodeType === Node.ELEMENT_NODE) {
               if (node.tagName === 'IMG') {
                 processImage(node);
+              } else if (node.tagName === 'VIDEO') {
+                try { node.pause(); } catch (e) {}
               } else if (node.querySelectorAll) {
                 node.querySelectorAll('img').forEach(processImage);
+                node.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch (e) {} });
                 // Check for SVG animations in added subtree
                 if (node.tagName === 'SVG' || node.querySelector?.('svg, animate, animateTransform, animateMotion, set')) {
                   killSVGAnimations();

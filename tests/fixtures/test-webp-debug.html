@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head><title>WebP Debug Test</title></head>
+<body>
+  <h2>Static WebP (should NOT be replaced)</h2>
+  <img id="img-webp-static" src="https://www.gstatic.com/webp/gallery/1.webp" width="200">
+
+  <h2>Extensionless image from Google (content-type varies)</h2>
+  <img id="img-extensionless-google" src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTHpKsFMs64z3mCFPxmDp7eoci8sG9bJTlYzA&s" width="200">
+
+  <h2>Data URI (base64 encoded tiny GIF - Google often inlines these)</h2>
+  <img id="img-data-gif" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" width="200">
+
+  <h2>Static PNG (control - should NOT be replaced)</h2>
+  <img id="img-png" src="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png" width="200">
+
+  <script>
+    // Log what the extension does
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === 'attributes' && m.attributeName === 'data-still') {
+          const el = m.target;
+          console.log(`[Still Debug] ${el.id}: data-still=${el.dataset.still}, src=${el.src.substring(0, 80)}...`);
+        }
+      }
+    });
+    document.querySelectorAll('img').forEach(img => {
+      observer.observe(img, { attributes: true, attributeFilter: ['data-still'] });
+    });
+  </script>
+</body>
+</html>
