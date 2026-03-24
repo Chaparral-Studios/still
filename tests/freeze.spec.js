@@ -135,6 +135,40 @@ test.describe('Still — block and replace logic', () => {
     expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
+  test('does NOT replace 1x1 spacer GIF data URIs', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // Wait long enough for processing to complete
+    await page.waitForTimeout(1500);
+
+    const src = await page.$eval('#img-spacer-gif', el => el.src);
+    expect(src).toMatch(/^data:image\/gif/);
+    // Should NOT have been replaced
+    const still = await page.$eval('#img-spacer-gif', el => el.dataset.still);
+    expect(still).not.toBe('replaced');
+  });
+
+  test('does NOT replace 1x1 spacer GIF served from URL', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    // Add a 1x1 transparent GIF from a URL (like MacRumors 1x1.trans.gif)
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-url-spacer';
+      img.src = base + '/fixtures/1x1.trans.gif';
+      document.body.appendChild(img);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForTimeout(1500);
+
+    const still = await page.$eval('#img-url-spacer', el => el.dataset.still);
+    expect(still).toBe('static');
+  });
+
   test('replaces dynamically added GIF via MutationObserver', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
@@ -208,12 +242,11 @@ test.describe('Still — block and replace logic', () => {
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-extensionless');
-      return img && (img.dataset.still === 'replaced' || img.dataset.still === 'static');
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 5000 });
 
-    expect(['replaced', 'static']).toContain(
-      await page.$eval('#img-extensionless', el => el.dataset.still)
-    );
+    const src = await page.$eval('#img-extensionless', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
   test('replaces cross-origin extensionless GIF via header sniff', async ({ page }) => {
@@ -231,12 +264,11 @@ test.describe('Still — block and replace logic', () => {
 
     await page.waitForFunction(() => {
       const img = document.getElementById('img-cross-origin');
-      return img && (img.dataset.still === 'replaced' || img.dataset.still === 'static');
+      return img && img.dataset.still === 'replaced';
     }, { timeout: 10000 });
 
-    expect(['replaced', 'static']).toContain(
-      await page.$eval('#img-cross-origin', el => el.dataset.still)
-    );
+    const src = await page.$eval('#img-cross-origin', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
   test('tracks replaced URLs', async ({ page }) => {
@@ -253,5 +285,91 @@ test.describe('Still — block and replace logic', () => {
     // Check replacedURLs has entries
     const size = await page.evaluate(() => window.__still.replacedURLs.size);
     expect(size).toBeGreaterThan(0);
+  });
+
+  test('blocks CSS background-image animated GIFs', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    // Add a div with an animated GIF background
+    await page.evaluate((base) => {
+      const div = document.createElement('div');
+      div.id = 'bg-gif-div';
+      div.style.width = '200px';
+      div.style.height = '200px';
+      div.style.backgroundImage = `url(${base}/fixtures/animated.gif)`;
+      document.body.appendChild(div);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const div = document.getElementById('bg-gif-div');
+      return div && div.dataset.stillBg === 'blocked';
+    }, { timeout: 5000 });
+
+    const bg = await page.$eval('#bg-gif-div', el => getComputedStyle(el).backgroundImage);
+    expect(bg).toBe('none');
+  });
+
+  test('does NOT block CSS background-image for non-GIF', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((base) => {
+      const div = document.createElement('div');
+      div.id = 'bg-png-div';
+      div.style.width = '200px';
+      div.style.height = '200px';
+      div.style.backgroundImage = `url(${base}/fixtures/static.png)`;
+      document.body.appendChild(div);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForTimeout(1500);
+
+    const bg = await page.$eval('#bg-png-div', el => getComputedStyle(el).backgroundImage);
+    expect(bg).not.toBe('none');
+  });
+
+  test('removes SVG SMIL animation elements', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    // Add an SVG with SMIL animation
+    await page.evaluate(() => {
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.id = 'test-svg';
+      svg.setAttribute('width', '100');
+      svg.setAttribute('height', '100');
+
+      const circle = document.createElementNS(svgNS, 'circle');
+      circle.setAttribute('cx', '50');
+      circle.setAttribute('cy', '50');
+      circle.setAttribute('r', '40');
+
+      const animate = document.createElementNS(svgNS, 'animate');
+      animate.setAttribute('attributeName', 'r');
+      animate.setAttribute('values', '40;10;40');
+      animate.setAttribute('dur', '1s');
+      animate.setAttribute('repeatCount', 'indefinite');
+
+      circle.appendChild(animate);
+      svg.appendChild(circle);
+      document.body.appendChild(svg);
+    });
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('animate').length === 0;
+    }, { timeout: 5000 });
+
+    // Verify the animate element was removed but the SVG structure remains
+    const svgExists = await page.$eval('#test-svg', el => el.tagName === 'svg');
+    expect(svgExists).toBe(true);
+    const animateCount = await page.evaluate(() => document.querySelectorAll('animate').length);
+    expect(animateCount).toBe(0);
   });
 });

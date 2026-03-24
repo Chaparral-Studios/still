@@ -15,7 +15,7 @@
     "rule_resources": [
       {
         "id": "ruleset_gif",
-        "enabled": true,
+        "enabled": false,
         "path": "rules/ruleset_gif.json"
       },
       {

@@ -185,7 +185,13 @@
   // --- Animation detection for WebP/APNG (partial fetch) ---
 
   function isAnimatedWebPBuffer(bytes) {
-    // Look for ANMF chunk which indicates animation
+    // Fast check: VP8X header at byte 20 has an animation flag (bit 1).
+    // RIFF(4) + size(4) + WEBP(4) + VP8X(4) + chunk_size(4) = offset 20
+    if (bytes.length > 20 &&
+        bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x58) {
+      if (bytes[20] & 0x02) return true;
+    }
+    // Fallback: scan for ANMF chunk which indicates animation frames
     for (let i = 0; i < bytes.length - 4; i++) {
       if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x4D && bytes[i+3] === 0x46) return true;
     }
@@ -246,6 +252,46 @@
       .catch(() => false);
   }
 
+  // --- Spacer detection ---
+  // Skip tiny images (spacers, tracking pixels) — not worth replacing.
+  // Check both natural size and declared HTML/CSS size, because
+  // declarativeNetRequest may redirect a 1x1.gif to frozen.svg,
+  // changing naturalWidth to the SVG's dimensions.
+  function isSpacer(img) {
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (nw <= 1 && nh <= 1) return true;
+    // Check HTML attributes (width="1" height="1")
+    const aw = parseInt(img.getAttribute('width'), 10);
+    const ah = parseInt(img.getAttribute('height'), 10);
+    if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0) return true;
+    // Check if the element is invisible (zero layout size)
+    if (img.offsetWidth === 0 && img.offsetHeight === 0) return true;
+    return false;
+  }
+
+  // Check if a data:image/gif URI is actually animated (has multiple frames).
+  // Single-frame GIFs (spacers, static icons) should not be replaced.
+  function isAnimatedDataGif(src) {
+    // Look for the Netscape application extension block that signals animation:
+    // bytes 0x21 0xFF 0x0B "NETSCAPE"
+    // For data URIs we can decode and check.
+    try {
+      const b64 = src.split(/[;,]/)[2];
+      if (!b64) return true; // can't parse, assume animated
+      const bin = atob(b64);
+      // Search for 0x21 0xFF (application extension introducer)
+      for (let i = 0; i < bin.length - 3; i++) {
+        if (bin.charCodeAt(i) === 0x21 && bin.charCodeAt(i + 1) === 0xFF) {
+          return true; // has application extension — likely animated
+        }
+      }
+      return false; // no animation extension found — single-frame GIF
+    } catch (e) {
+      return true; // can't decode, assume animated to be safe
+    }
+  }
+
   // --- Process each image ---
 
   function processImage(img) {
@@ -256,6 +302,10 @@
 
     // --- Path A: .gif or data:image/gif — replace immediately (always animated) ---
     if (isDefinitelyAnimated(src)) {
+      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them
+      if (isSpacer(img)) { img.dataset.still = 'static'; return; }
+      // For data: GIF URIs, check if actually animated (skip single-frame GIFs)
+      if (DATA_GIF_RE.test(src) && !isAnimatedDataGif(src)) { img.dataset.still = 'static'; return; }
       img.dataset.still = 'replacing';
       replaceWithPlaceholder(img);
       return;
@@ -303,10 +353,45 @@
     }
   }
 
+  // --- CSS background-image GIF detection ---
+
+  const bgChecked = new WeakSet();
+
+  function scanBackgroundImages() {
+    // querySelectorAll('*') is expensive — limit to elements likely to have bg images
+    const candidates = document.querySelectorAll('div, span, a, section, aside, figure, li, td, button, header, footer');
+    for (const el of candidates) {
+      if (bgChecked.has(el)) continue;
+      const bg = getComputedStyle(el).backgroundImage;
+      if (!bg || bg === 'none') continue;
+      bgChecked.add(el);
+      // Check if any url() in the background-image points to a GIF
+      if (/url\(["']?[^"')]*\.gif(\?[^"')]*)?["']?\)/i.test(bg)) {
+        el.style.setProperty('background-image', 'none', 'important');
+        el.dataset.stillBg = 'blocked';
+      }
+    }
+  }
+
+  // --- SVG SMIL animation removal ---
+
+  function killSVGAnimations() {
+    // Pause all SVG elements' built-in animation timelines
+    document.querySelectorAll('svg').forEach((svg) => {
+      try { if (svg.pauseAnimations) svg.pauseAnimations(); } catch (e) {}
+    });
+    // Remove SMIL animation elements
+    document.querySelectorAll('animate, animateTransform, animateMotion, set').forEach((el) => {
+      el.remove();
+    });
+  }
+
   // --- Scanning ---
 
   function scanAll() {
     document.querySelectorAll('img').forEach(processImage);
+    scanBackgroundImages();
+    killSVGAnimations();
   }
 
   // --- MutationObserver ---
@@ -333,6 +418,10 @@
                 processImage(node);
               } else if (node.querySelectorAll) {
                 node.querySelectorAll('img').forEach(processImage);
+                // Check for SVG animations in added subtree
+                if (node.tagName === 'SVG' || node.querySelector?.('svg, animate, animateTransform, animateMotion, set')) {
+                  killSVGAnimations();
+                }
                 needsScan = true;
               }
             }
@@ -410,7 +499,8 @@
     window.__still = {
       processImage, replaceWithPlaceholder, replacedURLs,
       isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless,
-      scanAll, flaggedAnimatedURLs
+      isSpacer, isAnimatedDataGif,
+      scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs
     };
   }
 

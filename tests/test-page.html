@@ -40,9 +40,13 @@
   </div>
 
   <div class="test-case" id="test-data-uri">
-    <h3>Data URI GIF</h3>
-    <!-- Minimal 1x1 animated GIF as data URI -->
-    <img id="img-data-gif" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==">
+    <h3>Data URI GIF (animated, 3x3, has NETSCAPE block)</h3>
+    <img id="img-data-gif" src="data:image/gif;base64,R0lGODlhAwADAIABAP8AAP///yH/C05FVFNDQVBFMi4wAwEAAAAh+QQJCgABACwAAAAAAwADAAACBIyPBwUAIfkECQoAAQAsAAAAAAMAAwAAAgSMjwcFADs=">
+  </div>
+
+  <div class="test-case" id="test-spacer">
+    <h3>1x1 spacer GIF (should NOT be replaced)</h3>
+    <img id="img-spacer-gif" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==">
   </div>
 
   <div class="test-case" id="test-dynamic">
