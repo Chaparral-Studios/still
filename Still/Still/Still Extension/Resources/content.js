@@ -263,13 +263,14 @@
   function isSpacer(img) {
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw <= 1 && nh <= 1) return true;
+    if (nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
     // Check HTML attributes (width="1" height="1")
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
     if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0) return true;
-    // Check if the element is invisible (zero layout size)
-    if (img.offsetWidth === 0 && img.offsetHeight === 0) return true;
+    // Check if the element is invisible (zero layout size) — but only if
+    // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
+    if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
     return false;
   }
 
