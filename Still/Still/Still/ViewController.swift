@@ -2,7 +2,7 @@
 //  ViewController.swift
 //  Still
 //
-//  Created by Jon Myers on 3/20/26.
+//  Created by Jon Myers on 3/24/26.
 //
 
 import UIKit
@@ -24,14 +24,11 @@ class ViewController: UIViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Override point for customization.
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if let body = message.body as? String, body == "openSettings" {
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
-            }
-        }
+        // Override point for customization.
     }
 
 }

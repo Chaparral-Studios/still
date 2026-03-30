@@ -373,6 +373,34 @@ test.describe('Still — block and replace logic', () => {
     expect(animateCount).toBe(0);
   });
 
+  test('replaces lazy-loaded GIF even when naturalWidth/Height are initially 0', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    // Add a lazy-loaded GIF — loading="lazy" means the image may not have
+    // loaded when the content script first processes it, so naturalWidth and
+    // naturalHeight are 0. The bug: isSpacer() treated 0 <= 1 as a spacer.
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-lazy-gif';
+      img.loading = 'lazy';
+      img.src = base + '/fixtures/animated.gif';
+      img.style.width = '200px';
+      img.style.height = '200px';
+      document.body.appendChild(img);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-lazy-gif');
+      return img && img.dataset.still === 'replaced';
+    }, { timeout: 5000 });
+
+    const src = await page.$eval('#img-lazy-gif', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
   test('kills CSS transitions so style changes are instant (Amazon carousel pattern)', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/fixtures/test-transitions.html');

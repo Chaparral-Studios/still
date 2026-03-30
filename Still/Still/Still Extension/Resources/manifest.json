@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Still",
+  "version": "1.0",
+  "description": "Block animated GIFs, WebP, and APNG. Pause autoplay video. Cancel CSS animations.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_gif",
+        "enabled": false,
+        "path": "rules/ruleset_gif.json"
+      },
+      {
+        "id": "ruleset_webp",
+        "enabled": false,
+        "path": "rules/ruleset_webp.json"
+      },
+      {
+        "id": "ruleset_apng",
+        "enabled": false,
+        "path": "rules/ruleset_apng.json"
+      }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/frozen.svg"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

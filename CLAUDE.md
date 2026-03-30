@@ -32,6 +32,10 @@ npm run convert:macos
 npm run convert:all
 ```
 
+## Important
+
+- **Always close the iOS Simulator when done with it.** The user does not want to see animated GIFs on screen. Shut down simulators (`xcrun simctl shutdown`) and kill any local servers after taking screenshots.
+
 ## Key Patterns
 
 - **Browser API compatibility**: Uses `typeof browser !== 'undefined' ? browser : chrome` and wraps callback APIs in Promises to handle Safari (Promise-based) and Chrome (callback-based) differences.

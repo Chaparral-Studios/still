@@ -7,44 +7,47 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		FC1321762F6DEB87000926DE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1321752F6DEB87000926DE /* AppDelegate.swift */; };
-		FC13217A2F6DEB87000926DE /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = FC1321782F6DEB87000926DE /* Main.html */; };
-		FC13217C2F6DEB87000926DE /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = FC13217B2F6DEB87000926DE /* Icon.png */; };
-		FC13217E2F6DEB87000926DE /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = FC13217D2F6DEB87000926DE /* Style.css */; };
-		FC1321802F6DEB87000926DE /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC13217F2F6DEB87000926DE /* SceneDelegate.swift */; };
-		FC1321822F6DEB87000926DE /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1321812F6DEB87000926DE /* ViewController.swift */; };
-		FC1321852F6DEB87000926DE /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = FC1321832F6DEB87000926DE /* LaunchScreen.storyboard */; };
-		FC1321882F6DEB87000926DE /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = FC1321862F6DEB87000926DE /* Main.storyboard */; };
-		FC1321902F6DEB88000926DE /* Still Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = FC13218F2F6DEB88000926DE /* Still Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		FC1321952F6DEB88000926DE /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1321942F6DEB88000926DE /* SafariWebExtensionHandler.swift */; };
-		FC1321972F6DEB88000926DE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FC1321892F6DEB88000926DE /* Assets.xcassets */; };
-		FC1321A92F6DEB89000926DE /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A22F6DEB89000926DE /* popup.js */; };
-		FC1321AA2F6DEB89000926DE /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A32F6DEB89000926DE /* background.js */; };
-		FC1321AB2F6DEB89000926DE /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A42F6DEB89000926DE /* popup.html */; };
-		FC1321AC2F6DEB89000926DE /* icons in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A52F6DEB89000926DE /* icons */; };
-		FC1321AD2F6DEB89000926DE /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A62F6DEB89000926DE /* manifest.json */; };
-		FC1321AE2F6DEB89000926DE /* popup.css in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A72F6DEB89000926DE /* popup.css */; };
-		FC1321AF2F6DEB89000926DE /* content.js in Resources */ = {isa = PBXBuildFile; fileRef = FC1321A82F6DEB89000926DE /* content.js */; };
+		FC6C2A1A2F734E2800E5CEAC /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FC6C2A192F734E2800E5CEAC /* PrivacyInfo.xcprivacy */; };
+		FC81B11D2F734DDE00E56099 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC81B11C2F734DDE00E56099 /* AppDelegate.swift */; };
+		FC81B1212F734DDE00E56099 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = FC81B11F2F734DDE00E56099 /* Main.html */; };
+		FC81B1232F734DDE00E56099 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1222F734DDE00E56099 /* Icon.png */; };
+		FC81B1252F734DDE00E56099 /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1242F734DDE00E56099 /* Style.css */; };
+		FC81B1272F734DDE00E56099 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC81B1262F734DDE00E56099 /* SceneDelegate.swift */; };
+		FC81B1292F734DDE00E56099 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC81B1282F734DDE00E56099 /* ViewController.swift */; };
+		FC81B12C2F734DDE00E56099 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = FC81B12A2F734DDE00E56099 /* LaunchScreen.storyboard */; };
+		FC81B12F2F734DDE00E56099 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = FC81B12D2F734DDE00E56099 /* Main.storyboard */; };
+		FC81B1372F734DDF00E56099 /* Still Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = FC81B1362F734DDF00E56099 /* Still Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FC81B13C2F734DDF00E56099 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC81B13B2F734DDF00E56099 /* SafariWebExtensionHandler.swift */; };
+		FC81B13E2F734DDF00E56099 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1302F734DDE00E56099 /* Assets.xcassets */; };
+		FC81B1522F734DDF00E56099 /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1492F734DDF00E56099 /* popup.js */; };
+		FC81B1532F734DDF00E56099 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14A2F734DDF00E56099 /* background.js */; };
+		FC81B1542F734DDF00E56099 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14B2F734DDF00E56099 /* popup.html */; };
+		FC81B1552F734DDF00E56099 /* _metadata in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14C2F734DDF00E56099 /* _metadata */; };
+		FC81B1562F734DDF00E56099 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14D2F734DDF00E56099 /* icons */; };
+		FC81B1572F734DDF00E56099 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14E2F734DDF00E56099 /* manifest.json */; };
+		FC81B1582F734DDF00E56099 /* rules in Resources */ = {isa = PBXBuildFile; fileRef = FC81B14F2F734DDF00E56099 /* rules */; };
+		FC81B1592F734DDF00E56099 /* popup.css in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1502F734DDF00E56099 /* popup.css */; };
+		FC81B15A2F734DDF00E56099 /* content.js in Resources */ = {isa = PBXBuildFile; fileRef = FC81B1512F734DDF00E56099 /* content.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		FC1321912F6DEB88000926DE /* PBXContainerItemProxy */ = {
+		FC81B1382F734DDF00E56099 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = FC13216A2F6DEB87000926DE /* Project object */;
+			containerPortal = FC81B1112F734DDE00E56099 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = FC13218E2F6DEB88000926DE;
+			remoteGlobalIDString = FC81B1352F734DDF00E56099;
 			remoteInfo = "Still Extension";
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		FC13219D2F6DEB88000926DE /* Embed Foundation Extensions */ = {
+		FC81B1442F734DDF00E56099 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				FC1321902F6DEB88000926DE /* Still Extension.appex in Embed Foundation Extensions */,
+				FC81B1372F734DDF00E56099 /* Still Extension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -52,38 +55,41 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		FC1321722F6DEB87000926DE /* Still.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Still.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		FC1321752F6DEB87000926DE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		FC1321792F6DEB87000926DE /* Base */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = Base; path = Base.lproj/Main.html; sourceTree = "<group>"; };
-		FC13217B2F6DEB87000926DE /* Icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Icon.png; sourceTree = "<group>"; };
-		FC13217D2F6DEB87000926DE /* Style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = Style.css; sourceTree = "<group>"; };
-		FC13217F2F6DEB87000926DE /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
-		FC1321812F6DEB87000926DE /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
-		FC1321842F6DEB87000926DE /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
-		FC1321872F6DEB87000926DE /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
-		FC1321892F6DEB88000926DE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		FC13218A2F6DEB88000926DE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		FC13218F2F6DEB88000926DE /* Still Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Still Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
-		FC1321942F6DEB88000926DE /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
-		FC1321962F6DEB88000926DE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		FC1321A22F6DEB89000926DE /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = "../../../web-extension/popup.js"; sourceTree = "<group>"; };
-		FC1321A32F6DEB89000926DE /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = "../../../web-extension/background.js"; sourceTree = "<group>"; };
-		FC1321A42F6DEB89000926DE /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = "../../../web-extension/popup.html"; sourceTree = "<group>"; };
-		FC1321A52F6DEB89000926DE /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = "../../../web-extension/icons"; sourceTree = "<group>"; };
-		FC1321A62F6DEB89000926DE /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = "../../../web-extension/manifest.json"; sourceTree = "<group>"; };
-		FC1321A72F6DEB89000926DE /* popup.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = popup.css; path = "../../../web-extension/popup.css"; sourceTree = "<group>"; };
-		FC1321A82F6DEB89000926DE /* content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = content.js; path = "../../../web-extension/content.js"; sourceTree = "<group>"; };
+		FC6C2A192F734E2800E5CEAC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		FC81B1192F734DDE00E56099 /* Still.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Still.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC81B11C2F734DDE00E56099 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		FC81B1202F734DDE00E56099 /* Base */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = Base; path = Base.lproj/Main.html; sourceTree = "<group>"; };
+		FC81B1222F734DDE00E56099 /* Icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Icon.png; sourceTree = "<group>"; };
+		FC81B1242F734DDE00E56099 /* Style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = Style.css; sourceTree = "<group>"; };
+		FC81B1262F734DDE00E56099 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		FC81B1282F734DDE00E56099 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		FC81B12B2F734DDE00E56099 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		FC81B12E2F734DDE00E56099 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		FC81B1302F734DDE00E56099 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		FC81B1312F734DDE00E56099 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		FC81B1362F734DDF00E56099 /* Still Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Still Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC81B13B2F734DDF00E56099 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		FC81B13D2F734DDF00E56099 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		FC81B1492F734DDF00E56099 /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = Resources/popup.js; sourceTree = "<group>"; };
+		FC81B14A2F734DDF00E56099 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = Resources/background.js; sourceTree = "<group>"; };
+		FC81B14B2F734DDF00E56099 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = Resources/popup.html; sourceTree = "<group>"; };
+		FC81B14C2F734DDF00E56099 /* _metadata */ = {isa = PBXFileReference; lastKnownFileType = folder; name = _metadata; path = Resources/_metadata; sourceTree = "<group>"; };
+		FC81B14D2F734DDF00E56099 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = Resources/icons; sourceTree = "<group>"; };
+		FC81B14E2F734DDF00E56099 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = Resources/manifest.json; sourceTree = "<group>"; };
+		FC81B14F2F734DDF00E56099 /* rules */ = {isa = PBXFileReference; lastKnownFileType = folder; name = rules; path = Resources/rules; sourceTree = "<group>"; };
+		FC81B1502F734DDF00E56099 /* popup.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = popup.css; path = Resources/popup.css; sourceTree = "<group>"; };
+		FC81B1512F734DDF00E56099 /* content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = content.js; path = Resources/content.js; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		FC13216F2F6DEB87000926DE /* Frameworks */ = {
+		FC81B1162F734DDE00E56099 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		FC13218C2F6DEB88000926DE /* Frameworks */ = {
+		FC81B1332F734DDF00E56099 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -93,69 +99,72 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		FC1321692F6DEB87000926DE = {
+		FC81B1102F734DDE00E56099 = {
 			isa = PBXGroup;
 			children = (
-				FC1321742F6DEB87000926DE /* Still */,
-				FC1321932F6DEB88000926DE /* Still Extension */,
-				FC1321732F6DEB87000926DE /* Products */,
+				FC81B11B2F734DDE00E56099 /* Still */,
+				FC81B13A2F734DDF00E56099 /* Still Extension */,
+				FC81B11A2F734DDE00E56099 /* Products */,
+				FC6C2A192F734E2800E5CEAC /* PrivacyInfo.xcprivacy */,
 			);
 			sourceTree = "<group>";
 		};
-		FC1321732F6DEB87000926DE /* Products */ = {
+		FC81B11A2F734DDE00E56099 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				FC1321722F6DEB87000926DE /* Still.app */,
-				FC13218F2F6DEB88000926DE /* Still Extension.appex */,
+				FC81B1192F734DDE00E56099 /* Still.app */,
+				FC81B1362F734DDF00E56099 /* Still Extension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-		FC1321742F6DEB87000926DE /* Still */ = {
+		FC81B11B2F734DDE00E56099 /* Still */ = {
 			isa = PBXGroup;
 			children = (
-				FC1321752F6DEB87000926DE /* AppDelegate.swift */,
-				FC13217F2F6DEB87000926DE /* SceneDelegate.swift */,
-				FC1321812F6DEB87000926DE /* ViewController.swift */,
-				FC1321832F6DEB87000926DE /* LaunchScreen.storyboard */,
-				FC1321862F6DEB87000926DE /* Main.storyboard */,
-				FC1321892F6DEB88000926DE /* Assets.xcassets */,
-				FC13218A2F6DEB88000926DE /* Info.plist */,
-				FC1321772F6DEB87000926DE /* Resources */,
+				FC81B11C2F734DDE00E56099 /* AppDelegate.swift */,
+				FC81B1262F734DDE00E56099 /* SceneDelegate.swift */,
+				FC81B1282F734DDE00E56099 /* ViewController.swift */,
+				FC81B12A2F734DDE00E56099 /* LaunchScreen.storyboard */,
+				FC81B12D2F734DDE00E56099 /* Main.storyboard */,
+				FC81B1302F734DDE00E56099 /* Assets.xcassets */,
+				FC81B1312F734DDE00E56099 /* Info.plist */,
+				FC81B11E2F734DDE00E56099 /* Resources */,
 			);
 			path = Still;
 			sourceTree = "<group>";
 		};
-		FC1321772F6DEB87000926DE /* Resources */ = {
+		FC81B11E2F734DDE00E56099 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				FC1321782F6DEB87000926DE /* Main.html */,
-				FC13217B2F6DEB87000926DE /* Icon.png */,
-				FC13217D2F6DEB87000926DE /* Style.css */,
+				FC81B11F2F734DDE00E56099 /* Main.html */,
+				FC81B1222F734DDE00E56099 /* Icon.png */,
+				FC81B1242F734DDE00E56099 /* Style.css */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
 		};
-		FC1321932F6DEB88000926DE /* Still Extension */ = {
+		FC81B13A2F734DDF00E56099 /* Still Extension */ = {
 			isa = PBXGroup;
 			children = (
-				FC1321A12F6DEB89000926DE /* Resources */,
-				FC1321942F6DEB88000926DE /* SafariWebExtensionHandler.swift */,
-				FC1321962F6DEB88000926DE /* Info.plist */,
+				FC81B1482F734DDF00E56099 /* Resources */,
+				FC81B13B2F734DDF00E56099 /* SafariWebExtensionHandler.swift */,
+				FC81B13D2F734DDF00E56099 /* Info.plist */,
 			);
 			path = "Still Extension";
 			sourceTree = "<group>";
 		};
-		FC1321A12F6DEB89000926DE /* Resources */ = {
+		FC81B1482F734DDF00E56099 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				FC1321A22F6DEB89000926DE /* popup.js */,
-				FC1321A32F6DEB89000926DE /* background.js */,
-				FC1321A42F6DEB89000926DE /* popup.html */,
-				FC1321A52F6DEB89000926DE /* icons */,
-				FC1321A62F6DEB89000926DE /* manifest.json */,
-				FC1321A72F6DEB89000926DE /* popup.css */,
-				FC1321A82F6DEB89000926DE /* content.js */,
+				FC81B1492F734DDF00E56099 /* popup.js */,
+				FC81B14A2F734DDF00E56099 /* background.js */,
+				FC81B14B2F734DDF00E56099 /* popup.html */,
+				FC81B14C2F734DDF00E56099 /* _metadata */,
+				FC81B14D2F734DDF00E56099 /* icons */,
+				FC81B14E2F734DDF00E56099 /* manifest.json */,
+				FC81B14F2F734DDF00E56099 /* rules */,
+				FC81B1502F734DDF00E56099 /* popup.css */,
+				FC81B1512F734DDF00E56099 /* content.js */,
 			);
 			name = Resources;
 			path = "Still Extension";
@@ -164,34 +173,34 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		FC1321712F6DEB87000926DE /* Still */ = {
+		FC81B1182F734DDE00E56099 /* Still */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FC13219E2F6DEB88000926DE /* Build configuration list for PBXNativeTarget "Still" */;
+			buildConfigurationList = FC81B1452F734DDF00E56099 /* Build configuration list for PBXNativeTarget "Still" */;
 			buildPhases = (
-				FC13216E2F6DEB87000926DE /* Sources */,
-				FC13216F2F6DEB87000926DE /* Frameworks */,
-				FC1321702F6DEB87000926DE /* Resources */,
-				FC13219D2F6DEB88000926DE /* Embed Foundation Extensions */,
+				FC81B1152F734DDE00E56099 /* Sources */,
+				FC81B1162F734DDE00E56099 /* Frameworks */,
+				FC81B1172F734DDE00E56099 /* Resources */,
+				FC81B1442F734DDF00E56099 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				FC1321922F6DEB88000926DE /* PBXTargetDependency */,
+				FC81B1392F734DDF00E56099 /* PBXTargetDependency */,
 			);
 			name = Still;
 			packageProductDependencies = (
 			);
 			productName = Still;
-			productReference = FC1321722F6DEB87000926DE /* Still.app */;
+			productReference = FC81B1192F734DDE00E56099 /* Still.app */;
 			productType = "com.apple.product-type.application";
 		};
-		FC13218E2F6DEB88000926DE /* Still Extension */ = {
+		FC81B1352F734DDF00E56099 /* Still Extension */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FC13219A2F6DEB88000926DE /* Build configuration list for PBXNativeTarget "Still Extension" */;
+			buildConfigurationList = FC81B1412F734DDF00E56099 /* Build configuration list for PBXNativeTarget "Still Extension" */;
 			buildPhases = (
-				FC13218B2F6DEB88000926DE /* Sources */,
-				FC13218C2F6DEB88000926DE /* Frameworks */,
-				FC13218D2F6DEB88000926DE /* Resources */,
+				FC81B1322F734DDF00E56099 /* Sources */,
+				FC81B1332F734DDF00E56099 /* Frameworks */,
+				FC81B1342F734DDF00E56099 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -201,127 +210,130 @@
 			packageProductDependencies = (
 			);
 			productName = "Still Extension";
-			productReference = FC13218F2F6DEB88000926DE /* Still Extension.appex */;
+			productReference = FC81B1362F734DDF00E56099 /* Still Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		FC13216A2F6DEB87000926DE /* Project object */ = {
+		FC81B1112F734DDE00E56099 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
-					FC1321712F6DEB87000926DE = {
+					FC81B1182F734DDE00E56099 = {
 						CreatedOnToolsVersion = 26.3;
 					};
-					FC13218E2F6DEB88000926DE = {
+					FC81B1352F734DDF00E56099 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
 			};
-			buildConfigurationList = FC13216D2F6DEB87000926DE /* Build configuration list for PBXProject "Still" */;
+			buildConfigurationList = FC81B1142F734DDE00E56099 /* Build configuration list for PBXProject "Still" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
 				Base,
 			);
-			mainGroup = FC1321692F6DEB87000926DE;
+			mainGroup = FC81B1102F734DDE00E56099;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = FC1321732F6DEB87000926DE /* Products */;
+			productRefGroup = FC81B11A2F734DDE00E56099 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				FC1321712F6DEB87000926DE /* Still */,
-				FC13218E2F6DEB88000926DE /* Still Extension */,
+				FC81B1182F734DDE00E56099 /* Still */,
+				FC81B1352F734DDF00E56099 /* Still Extension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		FC1321702F6DEB87000926DE /* Resources */ = {
+		FC81B1172F734DDE00E56099 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FC13217C2F6DEB87000926DE /* Icon.png in Resources */,
-				FC1321882F6DEB87000926DE /* Main.storyboard in Resources */,
-				FC1321852F6DEB87000926DE /* LaunchScreen.storyboard in Resources */,
-				FC13217A2F6DEB87000926DE /* Main.html in Resources */,
-				FC1321972F6DEB88000926DE /* Assets.xcassets in Resources */,
-				FC13217E2F6DEB87000926DE /* Style.css in Resources */,
+				FC81B1232F734DDE00E56099 /* Icon.png in Resources */,
+				FC6C2A1A2F734E2800E5CEAC /* PrivacyInfo.xcprivacy in Resources */,
+				FC81B12F2F734DDE00E56099 /* Main.storyboard in Resources */,
+				FC81B12C2F734DDE00E56099 /* LaunchScreen.storyboard in Resources */,
+				FC81B1212F734DDE00E56099 /* Main.html in Resources */,
+				FC81B13E2F734DDF00E56099 /* Assets.xcassets in Resources */,
+				FC81B1252F734DDE00E56099 /* Style.css in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		FC13218D2F6DEB88000926DE /* Resources */ = {
+		FC81B1342F734DDF00E56099 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FC1321AA2F6DEB89000926DE /* background.js in Resources */,
-				FC1321AC2F6DEB89000926DE /* icons in Resources */,
-				FC1321AE2F6DEB89000926DE /* popup.css in Resources */,
-				FC1321AD2F6DEB89000926DE /* manifest.json in Resources */,
-				FC1321AB2F6DEB89000926DE /* popup.html in Resources */,
-				FC1321AF2F6DEB89000926DE /* content.js in Resources */,
-				FC1321A92F6DEB89000926DE /* popup.js in Resources */,
+				FC81B1582F734DDF00E56099 /* rules in Resources */,
+				FC81B1532F734DDF00E56099 /* background.js in Resources */,
+				FC81B1552F734DDF00E56099 /* _metadata in Resources */,
+				FC81B1542F734DDF00E56099 /* popup.html in Resources */,
+				FC81B1592F734DDF00E56099 /* popup.css in Resources */,
+				FC81B1562F734DDF00E56099 /* icons in Resources */,
+				FC81B15A2F734DDF00E56099 /* content.js in Resources */,
+				FC81B1572F734DDF00E56099 /* manifest.json in Resources */,
+				FC81B1522F734DDF00E56099 /* popup.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		FC13216E2F6DEB87000926DE /* Sources */ = {
+		FC81B1152F734DDE00E56099 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FC1321822F6DEB87000926DE /* ViewController.swift in Sources */,
-				FC1321762F6DEB87000926DE /* AppDelegate.swift in Sources */,
-				FC1321802F6DEB87000926DE /* SceneDelegate.swift in Sources */,
+				FC81B1292F734DDE00E56099 /* ViewController.swift in Sources */,
+				FC81B11D2F734DDE00E56099 /* AppDelegate.swift in Sources */,
+				FC81B1272F734DDE00E56099 /* SceneDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		FC13218B2F6DEB88000926DE /* Sources */ = {
+		FC81B1322F734DDF00E56099 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FC1321952F6DEB88000926DE /* SafariWebExtensionHandler.swift in Sources */,
+				FC81B13C2F734DDF00E56099 /* SafariWebExtensionHandler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		FC1321922F6DEB88000926DE /* PBXTargetDependency */ = {
+		FC81B1392F734DDF00E56099 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = FC13218E2F6DEB88000926DE /* Still Extension */;
-			targetProxy = FC1321912F6DEB88000926DE /* PBXContainerItemProxy */;
+			target = FC81B1352F734DDF00E56099 /* Still Extension */;
+			targetProxy = FC81B1382F734DDF00E56099 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
-		FC1321782F6DEB87000926DE /* Main.html */ = {
+		FC81B11F2F734DDE00E56099 /* Main.html */ = {
 			isa = PBXVariantGroup;
 			children = (
-				FC1321792F6DEB87000926DE /* Base */,
+				FC81B1202F734DDE00E56099 /* Base */,
 			);
 			name = Main.html;
 			sourceTree = "<group>";
 		};
-		FC1321832F6DEB87000926DE /* LaunchScreen.storyboard */ = {
+		FC81B12A2F734DDE00E56099 /* LaunchScreen.storyboard */ = {
 			isa = PBXVariantGroup;
 			children = (
-				FC1321842F6DEB87000926DE /* Base */,
+				FC81B12B2F734DDE00E56099 /* Base */,
 			);
 			name = LaunchScreen.storyboard;
 			sourceTree = "<group>";
 		};
-		FC1321862F6DEB87000926DE /* Main.storyboard */ = {
+		FC81B12D2F734DDE00E56099 /* Main.storyboard */ = {
 			isa = PBXVariantGroup;
 			children = (
-				FC1321872F6DEB87000926DE /* Base */,
+				FC81B12E2F734DDE00E56099 /* Base */,
 			);
 			name = Main.storyboard;
 			sourceTree = "<group>";
@@ -329,7 +341,7 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
-		FC1321982F6DEB88000926DE /* Debug */ = {
+		FC81B13F2F734DDF00E56099 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -392,7 +404,7 @@
 			};
 			name = Debug;
 		};
-		FC1321992F6DEB88000926DE /* Release */ = {
+		FC81B1402F734DDF00E56099 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -448,11 +460,12 @@
 			};
 			name = Release;
 		};
-		FC13219B2F6DEB88000926DE /* Debug */ = {
+		FC81B1422F734DDF00E56099 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 55XHFQJ4X3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Still Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Still Extension";
@@ -480,11 +493,12 @@
 			};
 			name = Debug;
 		};
-		FC13219C2F6DEB88000926DE /* Release */ = {
+		FC81B1432F734DDF00E56099 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 55XHFQJ4X3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Still Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Still Extension";
@@ -512,13 +526,14 @@
 			};
 			name = Release;
 		};
-		FC13219F2F6DEB88000926DE /* Debug */ = {
+		FC81B1462F734DDF00E56099 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 55XHFQJ4X3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Still/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Still;
@@ -539,7 +554,7 @@
 					"-framework",
 					WebKit,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.jonbaker.Still;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jonbaker.still;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -551,13 +566,14 @@
 			};
 			name = Debug;
 		};
-		FC1321A02F6DEB88000926DE /* Release */ = {
+		FC81B1472F734DDF00E56099 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 55XHFQJ4X3;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Still/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Still;
@@ -578,7 +594,7 @@
 					"-framework",
 					WebKit,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.jonbaker.Still;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jonbaker.still;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -593,34 +609,34 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		FC13216D2F6DEB87000926DE /* Build configuration list for PBXProject "Still" */ = {
+		FC81B1142F734DDE00E56099 /* Build configuration list for PBXProject "Still" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				FC1321982F6DEB88000926DE /* Debug */,
-				FC1321992F6DEB88000926DE /* Release */,
+				FC81B13F2F734DDF00E56099 /* Debug */,
+				FC81B1402F734DDF00E56099 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FC13219A2F6DEB88000926DE /* Build configuration list for PBXNativeTarget "Still Extension" */ = {
+		FC81B1412F734DDF00E56099 /* Build configuration list for PBXNativeTarget "Still Extension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				FC13219B2F6DEB88000926DE /* Debug */,
-				FC13219C2F6DEB88000926DE /* Release */,
+				FC81B1422F734DDF00E56099 /* Debug */,
+				FC81B1432F734DDF00E56099 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FC13219E2F6DEB88000926DE /* Build configuration list for PBXNativeTarget "Still" */ = {
+		FC81B1452F734DDF00E56099 /* Build configuration list for PBXNativeTarget "Still" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				FC13219F2F6DEB88000926DE /* Debug */,
-				FC1321A02F6DEB88000926DE /* Release */,
+				FC81B1462F734DDF00E56099 /* Debug */,
+				FC81B1472F734DDF00E56099 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = FC13216A2F6DEB87000926DE /* Project object */;
+	rootObject = FC81B1112F734DDE00E56099 /* Project object */;
 }
