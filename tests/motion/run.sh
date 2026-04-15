@@ -28,9 +28,9 @@ REF_WT="/tmp/still-motion-ref-wt"
 # Auto-pick cookies by hostname.
 HOST="$(echo "$URL" | sed -E 's#https?://##; s#/.*##' | sed 's/^www\.//')"
 COOKIES_FILE="$SCRIPT_DIR/cookies/${HOST}.json"
-COOKIES_ARG=""
+COOKIES_ARGS=()
 if [ -f "$COOKIES_FILE" ]; then
-  COOKIES_ARG="--cookies $COOKIES_FILE"
+  COOKIES_ARGS=(--cookies "$COOKIES_FILE")
   echo ">> using cookies: $COOKIES_FILE"
 fi
 
@@ -39,23 +39,24 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$SCRIPT_DIR/reports/${SLUG}_${STAMP}"
 mkdir -p "$RUN_DIR"
 
+# run_variant <name> [extra args passed through to record.mts]
 run_variant () {
-  local name="$1"; local ext_arg="$2"
+  local name="$1"; shift
   local vdir="$RUN_DIR/$name"
   mkdir -p "$vdir"
   echo ">> recording: $name"
-  npx tsx "$SCRIPT_DIR/record.mts" --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" $COOKIES_ARG $ext_arg
+  npx tsx "$SCRIPT_DIR/record.mts" --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} "$@"
   echo ">> analyzing: $name"
   npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
 }
 
 case "$MODE" in
   single)
-    run_variant "current" "--ext $REPO_ROOT/web-extension"
+    run_variant "current" --ext "$REPO_ROOT/web-extension"
     ;;
   baseline)
-    run_variant "none" ""
-    run_variant "current" "--ext $REPO_ROOT/web-extension"
+    run_variant "none"
+    run_variant "current" --ext "$REPO_ROOT/web-extension"
     ;;
   compare|*)
     # Ensure ref worktree exists at $REF.
@@ -64,8 +65,8 @@ case "$MODE" in
     else
       (cd "$REF_WT" && git fetch --quiet origin && git reset --hard "origin/$REF" 2>/dev/null || git reset --hard "$REF")
     fi
-    run_variant "$REF" "--ext $REF_WT/web-extension"
-    run_variant "current" "--ext $REPO_ROOT/web-extension"
+    run_variant "$REF" --ext "$REF_WT/web-extension"
+    run_variant "current" --ext "$REPO_ROOT/web-extension"
     ;;
 esac
 
