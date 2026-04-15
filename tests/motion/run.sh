@@ -63,7 +63,11 @@ case "$MODE" in
     if [ ! -d "$REF_WT" ]; then
       git -C "$REPO_ROOT" worktree add "$REF_WT" "$REF"
     else
-      (cd "$REF_WT" && git fetch --quiet origin && git reset --hard "origin/$REF" 2>/dev/null || git reset --hard "$REF")
+      # Use git -C so we never rely on cd; that way a failure can't accidentally
+      # run reset --hard in the caller's working tree.
+      git -C "$REF_WT" fetch --quiet origin || true   # tolerate offline
+      git -C "$REF_WT" reset --hard "origin/$REF" \
+        || git -C "$REF_WT" reset --hard "$REF"
     fi
     run_variant "$REF" --ext "$REF_WT/web-extension"
     run_variant "current" --ext "$REPO_ROOT/web-extension"
