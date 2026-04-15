@@ -30,8 +30,13 @@
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
-    // Kill all CSS transitions — prevents smooth crossfades, carousel glides, etc.
-    '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Kill all CSS transitions AND keyframe animations — prevents crossfades, carousels,
+    // spinning badges, countdown timers, and any other CSS-driven motion.
+    '*, *::before, *::after {',
+    '  transition-duration: 0s !important;',
+    '  animation-duration: 0s !important;',
+    '  animation-delay: 0s !important;',
+    '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
@@ -369,8 +374,8 @@
       const bg = getComputedStyle(el).backgroundImage;
       if (!bg || bg === 'none') continue;
       bgChecked.add(el);
-      // Check if any url() in the background-image points to a GIF
-      if (/url\(["']?[^"')]*\.gif(\?[^"')]*)?["']?\)/i.test(bg)) {
+      // Check if any url() in the background-image points to an animated format
+      if (/url\(["']?[^"')]*\.(gif|webp|apng)(\?[^"')]*)?["']?\)/i.test(bg)) {
         el.style.setProperty('background-image', 'none', 'important');
         el.dataset.stillBg = 'blocked';
       }
@@ -390,12 +395,20 @@
     });
   }
 
-  // --- Pause all videos ---
+  // --- Pause all videos and prevent re-play ---
+
+  const blockedVideos = new WeakSet();
+
+  function blockVideo(v) {
+    try { v.pause(); } catch (e) {}
+    if (!blockedVideos.has(v)) {
+      blockedVideos.add(v);
+      v.addEventListener('play', () => { try { v.pause(); } catch (e) {} }, true);
+    }
+  }
 
   function pauseVideos() {
-    document.querySelectorAll('video').forEach((v) => {
-      try { v.pause(); } catch (e) {}
-    });
+    document.querySelectorAll('video').forEach(blockVideo);
   }
 
   // --- Scanning ---
@@ -405,6 +418,7 @@
     scanBackgroundImages();
     killSVGAnimations();
     pauseVideos();
+    cancelAnimations();
   }
 
   // --- MutationObserver ---
@@ -430,10 +444,10 @@
               if (node.tagName === 'IMG') {
                 processImage(node);
               } else if (node.tagName === 'VIDEO') {
-                try { node.pause(); } catch (e) {}
+                blockVideo(node);
               } else if (node.querySelectorAll) {
                 node.querySelectorAll('img').forEach(processImage);
-                node.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch (e) {} });
+                node.querySelectorAll('video').forEach(blockVideo);
                 // Check for SVG animations in added subtree
                 if (node.tagName === 'SVG' || node.querySelector?.('svg, animate, animateTransform, animateMotion, set')) {
                   killSVGAnimations();
