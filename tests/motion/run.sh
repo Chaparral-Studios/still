@@ -12,7 +12,7 @@
 #
 # Site cookies (for bypassing bot walls / auth): place a Playwright cookie
 # JSON at tests/motion/cookies/<hostname>.json — it will be auto-loaded when
-# the URL's hostname matches. Use decrypt-chrome-cookies.mjs to generate one.
+# the URL's hostname matches. Use decrypt-chrome-cookies.mts to generate one.
 
 set -euo pipefail
 
@@ -44,9 +44,9 @@ run_variant () {
   local vdir="$RUN_DIR/$name"
   mkdir -p "$vdir"
   echo ">> recording: $name"
-  node "$SCRIPT_DIR/record.mjs" --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" $COOKIES_ARG $ext_arg
+  npx tsx "$SCRIPT_DIR/record.mts" --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" $COOKIES_ARG $ext_arg
   echo ">> analyzing: $name"
-  node "$SCRIPT_DIR/analyze.mjs" --in "$vdir"
+  npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
 }
 
 case "$MODE" in

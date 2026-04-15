@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 // Frame-diff analyzer. Reads recording.webm, writes motion.csv + heatmap.png + summary.json.
-// Usage: node analyze.mjs --in <dir>
+// Usage: tsx analyze.ts --in <dir>
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-function arg(name, fallback) {
+function arg(name: string): string | undefined;
+function arg(name: string, fallback: string): string;
+function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : fallback;
 }
 
-const dir = resolve(arg('in'));
+const inArg = arg('in');
+if (!inArg) { console.error('--in required'); process.exit(1); }
+const dir = resolve(inArg);
 const video = join(dir, 'recording.webm');
 const metaLog = join(dir, 'motion.log');
 const csvPath = join(dir, 'motion.csv');
@@ -30,8 +34,9 @@ execFileSync('ffmpeg', [
 
 // Parse metadata log: lines like "lavfi.signalstats.YAVG=1.234"
 const log = readFileSync(metaLog, 'utf8');
-const scores = [];
-let curFrame = null;
+type Score = { t: number; y: number };
+const scores: Score[] = [];
+let curFrame: number | null = null;
 for (const line of log.split('\n')) {
   const pts = line.match(/pts_time:([\d.]+)/);
   if (pts) curFrame = parseFloat(pts[1]);
@@ -53,9 +58,9 @@ execFileSync('ffmpeg', [
 
 // Mask scroll moments (±0.4s around each scroll) so viewport motion doesn't count.
 const scrollFile = join(dir, 'scroll_times.json');
-const scrollTimes = existsSync(scrollFile) ? JSON.parse(readFileSync(scrollFile, 'utf8')).scrollTimes : [];
+const scrollTimes: number[] = existsSync(scrollFile) ? JSON.parse(readFileSync(scrollFile, 'utf8')).scrollTimes : [];
 const MASK = 0.4;
-const isScroll = (t) => scrollTimes.some((s) => Math.abs(t - s) < MASK);
+const isScroll = (t: number) => scrollTimes.some((s) => Math.abs(t - s) < MASK);
 const kept = scores.filter((s) => !isScroll(s.t));
 const masked = scores.length - kept.length;
 

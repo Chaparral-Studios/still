@@ -6,11 +6,14 @@ the Still extension is blocking motion. Nothing ever paints to your display
 
 ## Files
 
-- `record.mjs` — Playwright headless recorder (optional extension load, optional cookies).
-- `analyze.mjs` — ffmpeg frame-diff, emits `motion.csv`, `heatmap.png`, `summary.json`.
+- `record.mts` — Playwright headless recorder (optional extension load, optional cookies).
+- `analyze.mts` — ffmpeg frame-diff, emits `motion.csv`, `heatmap.png`, `summary.json`.
 - `run.sh` — orchestrator; default mode compares current tree vs `main`.
-- `decrypt-chrome-cookies.mjs` — pulls cookies for a domain from your local
+- `decrypt-chrome-cookies.mts` — pulls cookies for a domain from your local
   Chrome profile, decrypts with macOS Keychain, writes a Playwright JSON.
+
+TypeScript scripts are run via `tsx` — no build step, no emit. Scoped
+`tsconfig.json` in this directory.
 
 Reports land in `reports/<slug>_<timestamp>/`.
 
@@ -47,7 +50,7 @@ ls -lt ~/Library/Application\ Support/Google/Chrome/*/Cookies
 # 2. Pull + decrypt cookies for the domain. First run prompts Keychain once —
 #    click "Always Allow" when macOS asks about "Chrome Safe Storage".
 mkdir -p tests/motion/cookies
-node tests/motion/decrypt-chrome-cookies.mjs \
+npx tsx tests/motion/decrypt-chrome-cookies.mts \
   --profile "Profile 3" \
   --domain amazon.com \
   --out tests/motion/cookies/amazon.com.json
@@ -77,7 +80,7 @@ means one big layout shift or popup, not ongoing animation.
   loading, A/B tests, time-of-day content. Expect run-to-run variance of
   ~0.5 on `meanMotion`. Run 3–5× before concluding a change helped or hurt.
 - Scroll masking assumes the video timeline starts at `newPage()`. If you
-  change `record.mjs`, keep the `tVideoStart` anchor correct or the scroll
+  change `record.mts`, keep the `tVideoStart` anchor correct or the scroll
   mask will drift.
 - The `ref` worktree at `/tmp/still-motion-ref-wt` is reused across runs.
   Delete it if you want a clean checkout.

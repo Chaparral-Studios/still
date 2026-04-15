@@ -1,28 +1,32 @@
 #!/usr/bin/env node
 // Headless recorder. Never paints to a display.
-// Usage: node record.mjs --url <url> --out <dir> [--ext <extension-dir>] [--seconds <n>]
+// Usage: tsx record.ts --url <url> --out <dir> [--ext <extension-dir>] [--seconds <n>] [--cookies <json>]
 
-import { chromium as rawChromium } from '@playwright/test';
+import { chromium as rawChromium, type Cookie, type Response } from '@playwright/test';
 import { addExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-
-const chromium = addExtra(rawChromium);
-chromium.use(StealthPlugin());
 import { mkdirSync, existsSync, renameSync, readdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-function arg(name, fallback) {
+const chromium = addExtra(rawChromium);
+chromium.use(StealthPlugin());
+
+function arg(name: string): string | undefined;
+function arg(name: string, fallback: string): string;
+function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : fallback;
 }
 
 const url = arg('url');
-const outDir = resolve(arg('out'));
-const extDir = arg('ext') ? resolve(arg('ext')) : null;
+const outArg = arg('out');
+if (!url || !outArg) { console.error('--url and --out required'); process.exit(1); }
+const outDir = resolve(outArg);
+const extArg = arg('ext');
+const extDir = extArg ? resolve(extArg) : null;
 const seconds = parseInt(arg('seconds', '30'), 10);
-const cookiesFile = arg('cookies', null);
+const cookiesFile = arg('cookies');
 
-if (!url) { console.error('--url required'); process.exit(1); }
 mkdirSync(outDir, { recursive: true });
 
 const viewport = { width: 1280, height: 800 };
@@ -50,12 +54,12 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 });
 
 if (cookiesFile && existsSync(cookiesFile)) {
-  const cookies = JSON.parse(readFileSync(cookiesFile, 'utf8'));
+  const cookies: Cookie[] = JSON.parse(readFileSync(cookiesFile, 'utf8'));
   for (const c of cookies) if (c.sameSite === 'None' && !c.secure) c.sameSite = 'Lax';
   let ok = 0, bad = 0;
   for (const c of cookies) {
     try { await context.addCookies([c]); ok++; }
-    catch (e) { bad++; console.log('reject', c.name, c.domain, e.message.slice(0, 80)); }
+    catch (e) { bad++; console.log('reject', c.name, c.domain, (e as Error).message.slice(0, 80)); }
   }
   console.log(`loaded ${ok} cookies, rejected ${bad}`);
 }
@@ -67,11 +71,11 @@ const tVideoStart = Date.now();
 // Give the extension's service worker a moment to spin up.
 if (extDir) await page.waitForTimeout(1500);
 
-let nav;
+let nav: Response | null = null;
 try {
   nav = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
 } catch (e) {
-  console.error('goto failed:', e.message);
+  console.error('goto failed:', (e as Error).message);
 }
 const debug = {
   status: nav ? nav.status() : null,
@@ -84,7 +88,7 @@ await page.screenshot({ path: join(outDir, 'debug-initial.png'), fullPage: false
 
 // Scroll through the page to trigger lazy-loaded motion. Timestamps are seconds
 // since newPage() so they line up with ffmpeg's pts_time on the recording.
-const scrollTimes = [];
+const scrollTimes: number[] = [];
 const steps = Math.max(1, Math.floor(seconds / 3));
 for (let i = 0; i < steps; i++) {
   const t = (Date.now() - tVideoStart) / 1000;
