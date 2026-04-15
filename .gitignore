@@ -5,3 +5,7 @@ test-results/
 xcuserdata/
 DerivedData/
 build/
+
+# Motion harness artifacts
+tests/motion/reports/
+tests/motion/cookies/
