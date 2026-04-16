@@ -19,7 +19,10 @@ function arg(name: string, fallback: string): string {
   return i >= 0 ? process.argv[i + 1] : fallback;
 }
 
-const profile = arg('profile', 'Profile 3');
+// Chrome's first profile is named "Default"; additional ones are "Profile 1",
+// "Profile 2", etc. Run `ls -lt ~/Library/Application\ Support/Google/Chrome/*/Cookies`
+// to see which one you use most recently if the default fails.
+const profile = arg('profile', 'Default');
 const domain = arg('domain', 'amazon.com');
 const outPath = arg('out', 'cookies.json');
 

@@ -47,7 +47,11 @@ const userDataDir = join(outDir, '.userdata');
 mkdirSync(userDataDir, { recursive: true });
 
 const context = await chromium.launchPersistentContext(userDataDir, {
-  headless: false, // required for extension loading; --headless=new makes it offscreen
+  // We set Playwright's `headless: false` so it doesn't pass its own `--headless`
+  // flag (which would disable MV3 extension loading). The actual offscreen
+  // rendering comes from `--headless=new` in launchArgs — nothing ever paints
+  // to a display. Net effect: extension loads AND no screen output.
+  headless: false,
   args: launchArgs,
   viewport,
   recordVideo: { dir: outDir, size: viewport },

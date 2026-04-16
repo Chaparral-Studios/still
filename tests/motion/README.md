@@ -19,8 +19,8 @@ Reports land in `reports/<slug>_<timestamp>/`.
 
 ## Prerequisites
 
-- `ffmpeg` on PATH (`brew install ffmpeg`).
-- `npm install` at repo root (installs Playwright + stealth plugin).
+- `ffmpeg` and `jq` on PATH (`brew install ffmpeg jq`).
+- `npm install` at repo root (installs Playwright + stealth plugin + tsx).
 
 ## Quick start
 

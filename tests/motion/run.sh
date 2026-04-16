@@ -89,7 +89,7 @@ REPORT="$RUN_DIR/report.md"
     name="$(basename "$v")"
     s="$v/summary.json"
     if [ -f "$s" ]; then
-      node -e "const s=require('$s'); console.log(\`| $name | \${s.frames} | \${s.meanMotion} | \${s.maxMotion} | \${s.movingFramesPct} |\`)"
+      jq -r --arg n "$name" '"| \($n) | \(.frames) | \(.meanMotion) | \(.maxMotion) | \(.movingFramesPct) |"' "$s"
     fi
   done
   echo ""
