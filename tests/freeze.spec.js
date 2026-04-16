@@ -497,6 +497,70 @@ test.describe('Still — block and replace logic', () => {
     expect(finalSrc).toMatch(/static\.png/);
   });
 
+  test('STILL replaces a real animated GIF that is lazy-loaded (does not leak via data-src heuristic)', async ({ page }) => {
+    // Leak test: the lazy-load pattern must not let a real animated GIF through.
+    // Page pattern: img starts with 1×1 spacer, then JS swaps in a real
+    // animated.gif via src. After the swap, our MutationObserver should
+    // re-process the img and replace it.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-lazy-to-real-gif';
+      img.src = base + '/fixtures/1x1.trans.gif';
+      img.setAttribute('data-src', base + '/fixtures/animated.gif');
+      img.style.width = '200px';
+      img.style.height = '150px';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForTimeout(500);
+    // Simulate the page's lazy-load JS firing.
+    await page.evaluate((base) => {
+      const img = document.getElementById('img-lazy-to-real-gif');
+      img.src = base + '/fixtures/animated.gif';
+    }, baseURL);
+    // Wait for MutationObserver → processImage → replaceWithPlaceholder
+    await page.waitForFunction(
+      () => document.getElementById('img-lazy-to-real-gif').dataset.still === 'replaced',
+      { timeout: 3000 }
+    );
+    const src = await page.$eval('#img-lazy-to-real-gif', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/); // our placeholder, not the real gif
+  });
+
+  test('STILL replaces a visibly-sized GIF even if filename contains "clear" or "blank" prefix', async ({ page }) => {
+    // Leak test for the URL-filename heuristic: `clear-skies.gif` or
+    // `blank-cover.gif` should NOT be treated as a spacer just because
+    // the filename starts with "clear" / "blank". Only the exact spacer
+    // basenames (blank.gif, clear.gif, 1x1.trans.gif, etc.) match.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    // Serve an actually-animated GIF but give it a misleading URL in a
+    // Playwright route handler.
+    await page.route('**/clear-skies.gif', async (route) => {
+      const fs = require('fs');
+      const path = require('path');
+      const body = fs.readFileSync(path.resolve(__dirname, 'fixtures', 'animated.gif'));
+      await route.fulfill({ status: 200, contentType: 'image/gif', body });
+    });
+    await page.evaluate(() => {
+      const img = document.createElement('img');
+      img.id = 'img-misleading-name';
+      img.src = '/clear-skies.gif';
+      img.style.width = '200px';
+      img.style.height = '150px';
+      document.body.appendChild(img);
+    });
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForFunction(
+      () => document.getElementById('img-misleading-name').dataset.still === 'replaced',
+      { timeout: 3000 }
+    );
+    const src = await page.$eval('#img-misleading-name', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/); // replaced, not leaked
+  });
+
   test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
     // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
     // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is

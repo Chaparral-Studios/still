@@ -271,26 +271,26 @@
   // Check both natural size and declared HTML/CSS size, because
   // declarativeNetRequest may redirect a 1x1.gif to frozen.svg,
   // changing naturalWidth to the SVG's dimensions.
-  // Common lazy-load URL/attr patterns. Lots of sites (WordPress, macrumors,
-  // many CMS templates) use a tiny GIF as the visible src while the real
-  // image URL lives in data-src / data-lazy-src / data-original. Without
-  // catching this, we replace the spacer with our pause icon and then our
-  // src-setter override blocks the page's lazy swap from ever running.
-  const LAZY_SRC_ATTRS = ['data-src', 'data-lazy-src', 'data-original', 'data-hi-res-src', 'data-srcset'];
-  const SPACER_URL_HINT_RE = /(?:^|\/)(?:1x1|blank|spacer|transparent|pixel|clear)(?:[._-]|\.gif$|\.png$)/i;
-
-  function hasLazyLoadAttribute(img) {
-    for (const a of LAZY_SRC_ATTRS) {
-      const v = img.getAttribute(a);
-      if (v && /^(?:https?:|\/)/.test(v.trim())) return true;
-    }
-    return false;
-  }
+  // Filename patterns that are almost certainly spacers / tracking pixels.
+  // Tight match: the spacer keyword must be the exact filename basename (no
+  // `-suffix` variants), optionally followed by `.trans`/`.blank`/etc. before
+  // the extension. This avoids false negatives on real GIFs whose name
+  // happens to contain one of these keywords (e.g., `clear-skies.gif`).
+  //   matches: 1x1.gif, blank.gif, spacer.gif, transparent.gif,
+  //            1x1.trans.gif, blank-spacer.gif (via .spacer.), etc.
+  //   does NOT match: clear-skies.gif, blank-square.gif, 1x1-foo.gif
+  const SPACER_URL_HINT_RE =
+    /(?:^|\/)(?:1x1|blank|spacer|transparent|pixel|clear|empty)(?:\.(?:trans|spacer|blank|empty|clear))?\.(?:gif|png)(?:$|\?)/i;
 
   function isSpacer(img) {
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
+    // Only trust natural dimensions when the current src has actually
+    // finished loading. `img.complete` is false after `src` is reassigned
+    // and before the new resource has loaded; trusting nw/nh then would
+    // let a real animated GIF leak through after a lazy-load swap from a
+    // 1×1 placeholder (whose nw/nh briefly remain as 1×1).
+    if (img.complete && nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
     // Check HTML attributes (width="1" height="1")
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
@@ -298,10 +298,8 @@
     // Check if the element is invisible (zero layout size) — but only if
     // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
     if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
-    // Lazy-load placeholder: img has data-src-ish pointing at a real URL.
-    // The visible src is a placeholder that will be swapped; don't replace.
-    if (hasLazyLoadAttribute(img)) return true;
-    // Filename hints — common spacer naming (1x1.trans.gif, blank.gif, etc.)
+    // Filename hints — classic spacer names (1x1.trans.gif, blank.gif, etc.).
+    // Narrow match: spacer keyword must be the filename basename, not a prefix.
     const src = img.currentSrc || img.src || '';
     if (SPACER_URL_HINT_RE.test(src)) return true;
     return false;
@@ -339,10 +337,41 @@
 
     // --- Path A: .gif or data:image/gif — replace immediately (always animated) ---
     if (isDefinitelyAnimated(src)) {
-      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them
+      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them.
+      // isSpacer is reliable once the image has loaded (naturalWidth>0); a
+      // URL-filename match is also reliable without waiting.
       if (isSpacer(img)) { img.dataset.still = 'static'; return; }
       // For data: GIF URIs, check if actually animated (skip single-frame GIFs)
       if (DATA_GIF_RE.test(src) && !isAnimatedDataGif(src)) { img.dataset.still = 'static'; return; }
+      // Not yet loaded and no URL hint — could still be a 1×1 spacer we can't
+      // tell about yet. Hide until we know (defer via load event). Without
+      // this, a race between page parse and our scan would have us either
+      // (a) falsely replace a lazy-load placeholder (blocks the page's src
+      // swap), or (b) flash the placeholder-as-pause-icon. The probing
+      // state + visibility:hidden mirrors what we do for extensionless URLs.
+      if (!img.complete || (img.naturalWidth === 0 && img.naturalHeight === 0)) {
+        img.dataset.still = 'probing';
+        img.style.visibility = 'hidden';
+        const settle = () => {
+          if (isSpacer(img)) {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          } else {
+            img.dataset.still = 'replacing';
+            replaceWithPlaceholder(img);
+          }
+        };
+        img.addEventListener('load', settle, { once: true });
+        // If the image fails to load (broken URL), unhide rather than leave
+        // the viewport empty. It'll be re-checked if src changes.
+        img.addEventListener('error', () => {
+          if (img.dataset.still === 'probing') {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          }
+        }, { once: true });
+        return;
+      }
       img.dataset.still = 'replacing';
       replaceWithPlaceholder(img);
       return;
@@ -488,7 +517,11 @@
             }
             continue;
           }
-          if (target.tagName === 'IMG' && target.dataset.still !== 'probing' && target.dataset.still !== 'static') {
+          // Re-process on src change unless the image is mid-probe (await'ing
+          // load event). In particular, `static` images MUST be re-processed:
+          // a lazy-load swap from a 1×1 spacer (marked static) to a real
+          // animated GIF would otherwise leak through unblocked.
+          if (target.tagName === 'IMG' && target.dataset.still !== 'probing') {
             target.dataset.still = '';
             processImage(target);
           }
