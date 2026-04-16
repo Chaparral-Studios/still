@@ -43,16 +43,17 @@ type DecryptError = { unsupported?: string; error?: string };
 function decrypt(buf: Buffer): string | DecryptError {
   if (buf.length < 3) return { error: 'empty' };
   const prefix = buf.slice(0, 3).toString();
-  // v10 = macOS/Linux AES-128-CBC, raw plaintext (no MAC prefix).
-  // v11 = Linux GNOME Keyring variant. v20 = Windows/Linux app-bound encryption
-  // with a 32-byte SHA-256(hostname) prefix. This tool only supports v10.
+  // v10 = macOS/Linux AES-128-CBC. v11 = Linux GNOME variant (unsupported here).
+  // v20 = Windows app-bound encryption (unsupported here).
   if (prefix !== 'v10') return { unsupported: prefix };
   const ct = buf.slice(3);
   const decipher = createDecipheriv('aes-128-cbc', key, iv);
   decipher.setAutoPadding(true);
   try {
     const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
-    return pt.toString('utf8');
+    // Modern Chrome (~124+) prepends a 32-byte SHA-256(hostname) MAC to every
+    // v10 plaintext on macOS as well. Always strip it.
+    return pt.slice(32).toString('utf8');
   } catch (e) {
     return { error: (e as Error).message };
   }
