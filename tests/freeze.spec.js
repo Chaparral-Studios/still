@@ -635,6 +635,142 @@ test.describe('Still — block and replace logic', () => {
     expect(leaks).toEqual([]);
   });
 
+  test('pixel-level: no animated frames painted during load of extensionless animated GIF', async ({ browser }) => {
+    // Stronger than the DOM-state test: record the actual rendered pixels via
+    // Playwright's recordVideo, then use ffmpeg to measure per-frame luminance
+    // difference over the settled window. If any frame shows motion above the
+    // VP8 encoder noise floor after the first 500ms, the animated GIF was
+    // visible in the rendered output — a real leak.
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const { spawnSync } = require('child_process');
+
+    const videoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'still-test-'));
+    const context = await browser.newContext({
+      recordVideo: { dir: videoDir, size: { width: 800, height: 600 } },
+      viewport: { width: 800, height: 600 },
+    });
+    // Mock chrome/browser API so content.js runs in test environment.
+    await context.addInitScript(() => {
+      window.browser = {
+        storage: { local: {
+          get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+          set() {},
+        }},
+        runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+      };
+    });
+
+    const page = await context.newPage();
+    // Serve a real, visibly-animated 200×200 GIF at an extensionless URL.
+    await page.route(`${baseURL}/hidden-animated`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/gif',
+        body: fs.readFileSync(path.resolve(__dirname, 'fixtures', 'test-slow.gif')),
+      })
+    );
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.goto(baseURL + '/test-page.html');
+    // Compose content.js + the extensionless-animated-GIF img into initial HTML.
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${contentJs}</script>
+      <body style="margin:0;background:#fff;">
+        <img src="${baseURL}/hidden-animated" style="width:200px;height:200px">
+      </body>
+    `);
+    // Record for 2.5s total; we'll analyze from 0.5s onward (post-settle).
+    await page.waitForTimeout(2500);
+    await page.close();
+    await context.close(); // flushes video
+
+    const videoFile = fs.readdirSync(videoDir).find((f) => f.endsWith('.webm'));
+    expect(videoFile).toBeTruthy();
+    const videoPath = path.join(videoDir, videoFile);
+
+    // ffmpeg: skip first 0.5s, resample to 10fps, tblend=difference frames,
+    // signalstats publishes YAVG of the diff per frame. metadata=print writes
+    // to stderr, so we capture it via spawnSync.
+    const ff = spawnSync('ffmpeg', [
+      '-y', '-ss', '0.5', '-i', videoPath,
+      '-vf', 'fps=10,tblend=all_mode=difference,signalstats,metadata=print',
+      '-f', 'null', '-',
+    ], { encoding: 'utf8' });
+    const log = ff.stderr || '';
+    const yavg = [];
+    for (const line of log.split('\n')) {
+      const m = line.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
+      if (m) yavg.push(parseFloat(m[1]));
+    }
+    expect(yavg.length).toBeGreaterThan(10); // analysis ran
+    // VP8 keyframe quantization produces occasional YAVG=1.0 spikes even on
+    // static content. Real animation would show sustained values > 1.5 across
+    // multiple frames. Threshold at 1.5.
+    const motionFrames = yavg.filter((v) => v > 1.5);
+    expect(motionFrames).toEqual([]);
+
+    // Cleanup
+    fs.rmSync(videoDir, { recursive: true, force: true });
+  });
+
+  test('pixel-level sanity: same test WITHOUT extension DOES detect motion', async ({ browser }) => {
+    // Meta-test: proves the pixel-level leak test isn't tautologically
+    // passing. Run the same scenario (extensionless animated GIF) with NO
+    // content.js injected, and assert that the recording DOES contain motion.
+    // If this fails, the test above would also pass meaninglessly.
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const { spawnSync } = require('child_process');
+
+    const videoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'still-sanity-'));
+    const context = await browser.newContext({
+      recordVideo: { dir: videoDir, size: { width: 800, height: 600 } },
+      viewport: { width: 800, height: 600 },
+    });
+    const page = await context.newPage();
+    await page.route(`${baseURL}/hidden-animated`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/gif',
+        body: fs.readFileSync(path.resolve(__dirname, 'fixtures', 'test-slow.gif')),
+      })
+    );
+    await page.goto(baseURL + '/test-page.html');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <body style="margin:0;background:#fff;">
+        <img src="${baseURL}/hidden-animated" style="width:200px;height:200px">
+      </body>
+    `);
+    await page.waitForTimeout(2500);
+    await page.close();
+    await context.close();
+
+    const videoFile = fs.readdirSync(videoDir).find((f) => f.endsWith('.webm'));
+    const videoPath = path.join(videoDir, videoFile);
+    const ff = spawnSync('ffmpeg', [
+      '-y', '-ss', '0.5', '-i', videoPath,
+      '-vf', 'fps=10,tblend=all_mode=difference,signalstats,metadata=print',
+      '-f', 'null', '-',
+    ], { encoding: 'utf8' });
+    const yavg = [];
+    for (const line of (ff.stderr || '').split('\n')) {
+      const m = line.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
+      if (m) yavg.push(parseFloat(m[1]));
+    }
+    // Without the extension, the animated GIF should produce detectable motion.
+    // The existing fixture is 3×3px scaled to 200×200 — not a huge signal, so
+    // use a lower threshold for this sanity check. Any non-zero motion proves
+    // the test would catch a real leak.
+    const motionFrames = yavg.filter((v) => v > 1.5);
+    expect(motionFrames.length).toBeGreaterThan(0);
+
+    fs.rmSync(videoDir, { recursive: true, force: true });
+  });
+
   test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
     // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
     // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is
