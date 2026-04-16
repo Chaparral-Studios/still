@@ -15,6 +15,12 @@
 #   MODE=sit-png ./run.sh <url> [sec]       # lossless PNG capture, sit mode:
 #                                           # catches sub-encoder-floor signal
 #                                           # (subpixel AA jitter, slow hue drift)
+#   MODE=flicker ./run.sh <url> [sec]       # CDP screencast + variance. Capped
+#                                           # at ~3fps in headless — slow-cycle
+#                                           # analysis only, not true flicker.
+#   AV_INDEX=N WINDOW_X=X WINDOW_Y=Y \
+#     MODE=flicker-real ./run.sh <url>      # true 60fps via AVFoundation capture
+#                                           # of a BetterDisplay virtual display
 #   REF=<git-ref> ./run.sh <url>            # compare against a specific ref
 #
 # SIT mode produces the purest "is this page animating?" signal — scrolling
@@ -91,6 +97,45 @@ case "$MODE" in
   sit-png)
     run_variant "none"    --no-scroll --png-capture
     run_variant "current" --no-scroll --png-capture --ext "$REPO_ROOT/web-extension"
+    ;;
+  flicker-real)
+    # True-compositor 60fps capture via AVFoundation, for a Chrome window
+    # running on a BetterDisplay virtual display (no photons anywhere).
+    # Requires env vars: AV_INDEX, WINDOW_X, WINDOW_Y (see list-displays.sh).
+    : "${AV_INDEX:?AV_INDEX required}"
+    : "${WINDOW_X:?WINDOW_X required}"
+    : "${WINDOW_Y:?WINDOW_Y required}"
+    for name in none current; do
+      ext_args=""
+      [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"
+      vdir="$RUN_DIR/$name"
+      mkdir -p "$vdir"
+      echo ">> capture: $name"
+      npx tsx "$SCRIPT_DIR/capture-display.mts" \
+        --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" \
+        --av-index "$AV_INDEX" --window-x "$WINDOW_X" --window-y "$WINDOW_Y" \
+        ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} $ext_args
+      echo ">> variance: $name"
+      npx tsx "$SCRIPT_DIR/variance.mts" --in "$vdir"
+      npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
+    done
+    ;;
+  flicker)
+    # Fast path: headless CDP screencast + variance. Limited to ~3fps in headless;
+    # use flicker-real for the migraine-frequency detection.
+    for name in none current; do
+      ext_args=""
+      [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"
+      vdir="$RUN_DIR/$name"
+      mkdir -p "$vdir"
+      echo ">> screencast: $name"
+      npx tsx "$SCRIPT_DIR/screencast.mts" --url "$URL" --out "$vdir" \
+        --seconds "$SECONDS_RUN" ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} $ext_args
+      echo ">> variance: $name"
+      npx tsx "$SCRIPT_DIR/variance.mts" --in "$vdir"
+      # Also produce the ordinary motion.csv + heatmap for comparison.
+      npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
+    done
     ;;
   compare|*)
     # Ensure ref worktree exists at $REF.

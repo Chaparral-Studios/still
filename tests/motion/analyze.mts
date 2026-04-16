@@ -3,7 +3,7 @@
 // Usage: tsx analyze.ts --in <dir>
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 function arg(name: string): string | undefined;
@@ -30,6 +30,11 @@ const summary = join(dir, 'summary.json');
 // The PNG path is required for detecting sub-1-luminance signal (subpixel AA
 // jitter, slow tint drift) because VP8 quantization masks it.
 const useFrames = existsSync(framesDir) && existsSync(frameTimesFile);
+// Detect frame extension (record.mts --png-capture writes .png; CDP screencast
+// writes .jpg). Both use zero-padded %06d names.
+const frameExt = useFrames
+  ? (readdirSync(framesDir).find((f) => /\.(png|jpe?g)$/i.test(f))?.match(/\.(png|jpe?g)$/i)?.[0] || '.jpg')
+  : '.jpg';
 if (!useFrames && !existsSync(video)) {
   console.error('need recording.webm OR frames/ + frame_times.json in', dir);
   process.exit(1);
@@ -40,7 +45,7 @@ if (!useFrames && !existsSync(video)) {
 if (useFrames) {
   // Drive from the PNG sequence; ffmpeg's image2 demuxer walks the indexed names.
   execFileSync('ffmpeg', [
-    '-y', '-framerate', '10', '-i', join(framesDir, '%06d.png'),
+    '-y', '-framerate', '10', '-i', join(framesDir, `%06d${frameExt}`),
     '-vf', `tblend=all_mode=difference,signalstats,metadata=print:file=${metaLog}`,
     '-f', 'null', '-',
   ], { stdio: ['ignore', 'ignore', 'inherit'] });
@@ -85,7 +90,7 @@ writeFileSync(csvPath, csv + '\n');
 // same file each frame, so the final PNG is the accumulated motion map.
 if (useFrames) {
   execFileSync('ffmpeg', [
-    '-y', '-framerate', '10', '-i', join(framesDir, '%06d.png'),
+    '-y', '-framerate', '10', '-i', join(framesDir, `%06d${frameExt}`),
     '-vf', 'tblend=all_mode=difference,format=gray,lagfun=decay=1.0,eq=contrast=4',
     '-update', '1', '-frames:v', '99999', heatmap,
   ], { stdio: ['ignore', 'ignore', 'inherit'] });
