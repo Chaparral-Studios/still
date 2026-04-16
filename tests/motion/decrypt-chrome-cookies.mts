@@ -43,15 +43,15 @@ type DecryptError = { unsupported?: string; error?: string };
 function decrypt(buf: Buffer): string | DecryptError {
   if (buf.length < 3) return { error: 'empty' };
   const prefix = buf.slice(0, 3).toString();
-  if (prefix !== 'v10') {
-    return { unsupported: prefix };
-  }
+  // v10 = macOS/Linux AES-128-CBC, raw plaintext (no MAC prefix).
+  // v11 = Linux GNOME Keyring variant. v20 = Windows/Linux app-bound encryption
+  // with a 32-byte SHA-256(hostname) prefix. This tool only supports v10.
+  if (prefix !== 'v10') return { unsupported: prefix };
   const ct = buf.slice(3);
   const decipher = createDecipheriv('aes-128-cbc', key, iv);
   decipher.setAutoPadding(true);
   try {
     const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
-    if (pt.length > 32 && pt[0] < 0x20) return pt.slice(32).toString('utf8');
     return pt.toString('utf8');
   } catch (e) {
     return { error: (e as Error).message };
