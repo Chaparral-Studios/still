@@ -6,6 +6,9 @@ xcuserdata/
 DerivedData/
 build/
 
+# Claude Code local state
+.claude/
+
 # Motion harness artifacts
 tests/motion/reports/
 tests/motion/cookies/
