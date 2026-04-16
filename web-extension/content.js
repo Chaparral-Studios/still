@@ -557,67 +557,16 @@
 
   }
 
-  // --- D3-style chart animation defusal ---
-  // Some chart libraries animate reveals by mutating an SVG path's `d`
-  // attribute each frame (recomputing the arc geometry over ~1s). This
-  // bypasses CSS animation overrides, WAAPI cancellation, and
-  // stroke-dashoffset rules entirely. Our fix: monkey-patch
-  // Element.prototype.setAttribute so that setting `d` on any SVGElement
-  // synchronously adds a `data-still-svg-settling` attribute (hidden via
-  // CSS). A debounced timer unhides the element once `d` has stopped
-  // changing for SETTLE_MS — meaning the chart has reached its final state.
-  //
-  // We use a prototype patch rather than a MutationObserver because
-  // MutationObserver callbacks fire as microtasks AFTER the setAttribute
-  // call returns, creating a one-rAF window in which the path renders
-  // partially drawn before we can hide it. The sync patch closes that race.
-  //
-  // The patch is narrow: only intervenes on `d` attribute writes to SVG
-  // elements, so non-SVG setAttribute calls are unaffected.
-  (function patchSetAttributeForSvgD() {
-    const SETTLE_MS = 300;
-    const svgSettleTimers = new WeakMap();
-    const origSetAttribute = Element.prototype.setAttribute;
-    const origSetAttributeNS = Element.prototype.setAttributeNS;
-
-    function markSettling(el) {
-      origSetAttribute.call(el, 'data-still-svg-settling', '');
-      const existing = svgSettleTimers.get(el);
-      if (existing) clearTimeout(existing);
-      const t = setTimeout(() => {
-        el.removeAttribute('data-still-svg-settling');
-        svgSettleTimers.delete(el);
-      }, SETTLE_MS);
-      svgSettleTimers.set(el, t);
-    }
-
-    Element.prototype.setAttribute = function (name, value) {
-      // Catch any attribute change that could be a geometry-animation driver:
-      // `d` on path, `cx`/`cy`/`r` on circle, `x`/`y`/`width`/`height` on rect,
-      // `points` on polyline/polygon, or `transform` on anything SVG.
-      if (this instanceof SVGElement && (
-        name === 'd' || name === 'points' || name === 'transform' ||
-        name === 'cx' || name === 'cy' || name === 'r' || name === 'rx' || name === 'ry' ||
-        name === 'x' || name === 'y' || name === 'width' || name === 'height' ||
-        name === 'x1' || name === 'y1' || name === 'x2' || name === 'y2'
-      )) {
-        markSettling(this);
-      }
-      return origSetAttribute.apply(this, arguments);
-    };
-
-    Element.prototype.setAttributeNS = function (ns, name, value) {
-      if (this instanceof SVGElement && (
-        name === 'd' || name === 'points' || name === 'transform' ||
-        name === 'cx' || name === 'cy' || name === 'r' || name === 'rx' || name === 'ry' ||
-        name === 'x' || name === 'y' || name === 'width' || name === 'height' ||
-        name === 'x1' || name === 'y1' || name === 'x2' || name === 'y2'
-      )) {
-        markSettling(this);
-      }
-      return origSetAttributeNS.apply(this, arguments);
-    };
-  })();
+  // NOTE: the SVG geometry-attribute prototype patch that defuses D3-style
+  // chart reveals (Fidelity pie chart pattern) lives in main-world-patch.js
+  // and runs at document_start via a separate manifest.json content_scripts
+  // entry with "world": "MAIN". This is mandatory: content scripts run in
+  // an isolated world by default, and prototype patches there only affect
+  // the isolated world's Element.prototype — not the page's. We still ship
+  // the CSS rule `svg [data-still-svg-settling] { visibility: hidden !important }`
+  // in the <style> block above (injected from this isolated-world script),
+  // which works cross-world because CSS applies to rendered DOM regardless
+  // of which world the rule was added from.
 
   // --- CSS animation cancellation ---
 

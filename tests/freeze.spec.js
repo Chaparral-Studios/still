@@ -786,7 +786,12 @@ test.describe('Still — block and replace logic', () => {
     // We assert that at NO rAF sample did the path have visibility:visible
     // while its `d` was in flux.
     const fs = require('fs');
+    const path = require('path');
     const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    const mainWorldPatchJs = fs.readFileSync(
+      path.resolve(__dirname, '..', 'web-extension', 'main-world-patch.js'),
+      'utf8'
+    );
     await page.setContent(`
       <!DOCTYPE html>
       <script>
@@ -802,6 +807,7 @@ test.describe('Still — block and replace logic', () => {
           runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
         };
       </script>
+      <script>${mainWorldPatchJs}</script>
       <script>${contentJs}</script>
       <body style="margin:0;background:#fff;">
         <svg width="200" height="200" viewBox="0 0 100 100">
