@@ -30,8 +30,24 @@
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
-    // Kill all CSS transitions — prevents smooth crossfades, carousel glides, etc.
+    // Kill all CSS transitions so style changes are instant (prevents smooth
+    // crossfades, carousel glides, etc.).
     '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Kill animations ONLY on html/body (covers WordPress body fade-in reveal
+    // pattern that hid the whole page on nplusonemag.com). JS cancelAnimations
+    // handles other page-level animations via updateTiming+finish.
+    'html, body {',
+    '  animation-duration: 0s !important;',
+    '  animation-delay: 0s !important;',
+    '  animation-fill-mode: forwards !important;',
+    '}',
+    // SVG path d-attribute mutation reveal animations (D3-style charts like
+    // Fidelity's Goals pie chart) get hidden during their active period and
+    // revealed only once `d` has stabilized — see observeMutations for the
+    // settle-tracking logic. This CSS rule is the hide mechanism.
+    'svg [data-still-svg-settling] {',
+    '  visibility: hidden !important;',
+    '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
@@ -260,10 +276,28 @@
   // Check both natural size and declared HTML/CSS size, because
   // declarativeNetRequest may redirect a 1x1.gif to frozen.svg,
   // changing naturalWidth to the SVG's dimensions.
+  // Filename patterns that are almost certainly spacers / tracking pixels.
+  // Tight match: the spacer keyword must be the exact filename basename (no
+  // `-suffix` variants), optionally followed by `.trans`/`.blank`/etc. before
+  // the extension. This avoids false negatives on real GIFs whose name
+  // happens to contain one of these keywords (e.g., `clear-skies.gif`).
+  //   matches: 1x1.gif, blank.gif, spacer.gif, transparent.gif,
+  //            1x1.trans.gif, blank.spacer.gif (dot-separated infix), etc.
+  //   does NOT match: clear-skies.gif, blank-square.gif, blank-spacer.gif,
+  //                   1x1-foo.gif (hyphenated variants don't satisfy the
+  //                   dot-separator requirement in the optional group)
+  const SPACER_URL_HINT_RE =
+    /(?:^|\/)(?:1x1|blank|spacer|transparent|pixel|clear|empty)(?:\.(?:trans|spacer|blank|empty|clear))?\.(?:gif|png)(?:$|\?)/i;
+
   function isSpacer(img) {
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
+    // Only trust natural dimensions when the current src has actually
+    // finished loading. `img.complete` is false after `src` is reassigned
+    // and before the new resource has loaded; trusting nw/nh then would
+    // let a real animated GIF leak through after a lazy-load swap from a
+    // 1×1 placeholder (whose nw/nh briefly remain as 1×1).
+    if (img.complete && nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
     // Check HTML attributes (width="1" height="1")
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
@@ -271,6 +305,10 @@
     // Check if the element is invisible (zero layout size) — but only if
     // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
     if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
+    // Filename hints — classic spacer names (1x1.trans.gif, blank.gif, etc.).
+    // Narrow match: spacer keyword must be the filename basename, not a prefix.
+    const src = img.currentSrc || img.src || '';
+    if (SPACER_URL_HINT_RE.test(src)) return true;
     return false;
   }
 
@@ -306,10 +344,41 @@
 
     // --- Path A: .gif or data:image/gif — replace immediately (always animated) ---
     if (isDefinitelyAnimated(src)) {
-      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them
+      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them.
+      // isSpacer is reliable once the image has loaded (naturalWidth>0); a
+      // URL-filename match is also reliable without waiting.
       if (isSpacer(img)) { img.dataset.still = 'static'; return; }
       // For data: GIF URIs, check if actually animated (skip single-frame GIFs)
       if (DATA_GIF_RE.test(src) && !isAnimatedDataGif(src)) { img.dataset.still = 'static'; return; }
+      // Not yet loaded and no URL hint — could still be a 1×1 spacer we can't
+      // tell about yet. Hide until we know (defer via load event). Without
+      // this, a race between page parse and our scan would have us either
+      // (a) falsely replace a lazy-load placeholder (blocks the page's src
+      // swap), or (b) flash the placeholder-as-pause-icon. The probing
+      // state + visibility:hidden mirrors what we do for extensionless URLs.
+      if (!img.complete || (img.naturalWidth === 0 && img.naturalHeight === 0)) {
+        img.dataset.still = 'probing';
+        img.style.visibility = 'hidden';
+        const settle = () => {
+          if (isSpacer(img)) {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          } else {
+            img.dataset.still = 'replacing';
+            replaceWithPlaceholder(img);
+          }
+        };
+        img.addEventListener('load', settle, { once: true });
+        // If the image fails to load (broken URL), unhide rather than leave
+        // the viewport empty. It'll be re-checked if src changes.
+        img.addEventListener('error', () => {
+          if (img.dataset.still === 'probing') {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          }
+        }, { once: true });
+        return;
+      }
       img.dataset.still = 'replacing';
       replaceWithPlaceholder(img);
       return;
@@ -405,6 +474,11 @@
     scanBackgroundImages();
     killSVGAnimations();
     pauseVideos();
+    // Also re-run cancelAnimations on every scan so late-arriving animations
+    // (async-loaded widgets like Fidelity's SVG pie chart that kicks in after
+    // the data finishes loading — well past DOMContentLoaded) get caught as
+    // soon as the MutationObserver notices the SVG being injected.
+    cancelAnimations();
   }
 
   // --- MutationObserver ---
@@ -455,7 +529,11 @@
             }
             continue;
           }
-          if (target.tagName === 'IMG' && target.dataset.still !== 'probing' && target.dataset.still !== 'static') {
+          // Re-process on src change unless the image is mid-probe (await'ing
+          // load event). In particular, `static` images MUST be re-processed:
+          // a lazy-load swap from a 1×1 spacer (marked static) to a real
+          // animated GIF would otherwise leak through unblocked.
+          if (target.tagName === 'IMG' && target.dataset.still !== 'probing') {
             target.dataset.still = '';
             processImage(target);
           }
@@ -476,16 +554,61 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset']
+      attributeFilter: ['src', 'srcset', 'd']
     });
+
   }
+
+  // NOTE: the SVG geometry-attribute prototype patch that defuses D3-style
+  // chart reveals (Fidelity pie chart pattern) lives in main-world-patch.js
+  // and runs at document_start via a separate manifest.json content_scripts
+  // entry with "world": "MAIN". This is mandatory: content scripts run in
+  // an isolated world by default, and prototype patches there only affect
+  // the isolated world's Element.prototype — not the page's. We still ship
+  // the CSS rule `svg [data-still-svg-settling] { visibility: hidden !important }`
+  // in the <style> block above (injected from this isolated-world script),
+  // which works cross-world because CSS applies to rendered DOM regardless
+  // of which world the rule was added from.
 
   // --- CSS animation cancellation ---
 
   function cancelAnimations() {
+    // `Animation.cancel()` reverts to PRE-animation style. `finish()` jumps to
+    // the end of the active duration — but for a finite animation with fill:none
+    // (default), once the active period ends the animated properties no longer
+    // apply and the element reverts anyway. To reliably "snap to the end state"
+    // regardless of the author's fill mode (the migraine-safety goal: "show
+    // whatever the animation is progressing toward"), we upgrade fill to
+    // 'forwards' via updateTiming() before calling finish(). This works for
+    // Fidelity-style SVG stroke-dashoffset reveals (pie chart fill animation)
+    // where the author didn't set fill: forwards — the animated pie stays fully
+    // drawn instead of reverting to an invisible base.
+    //
+    // Rules:
+    //   - Infinite iterations: cancel() — no meaningful end state; these are the
+    //     ones we actually want to stop outright (spinners, loops).
+    //   - Finite with any fill mode: upgrade to fill:forwards + finish() —
+    //     snaps instantly to the animation's end state and keeps it there.
     try {
       for (const a of document.getAnimations({ subtree: true })) {
-        a.cancel();
+        try {
+          const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+            ? a.effect.getComputedTiming()
+            : null;
+          const iterations = timing && timing.iterations;
+          if (iterations === Infinity) {
+            a.cancel();
+          } else if (a.effect && typeof a.effect.updateTiming === 'function') {
+            // Force fill to forwards so the end state persists post-finish,
+            // even if the author specified fill: none (default).
+            try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
+            a.finish();
+          } else {
+            a.cancel();
+          }
+        } catch (e) {
+          try { a.cancel(); } catch (e2) {}
+        }
       }
     } catch (e) {}
   }
@@ -508,6 +631,13 @@
     }
 
     window.addEventListener('load', scanAll);
+
+    // Backup cancellation passes for animations that appear after all the
+    // usual hooks (lazy widgets, dashboards that load data async then render
+    // an animated SVG, etc.). Cheap — cancelAnimations is just a
+    // document.getAnimations() iteration; if there's nothing to cancel these
+    // are near no-ops.
+    [500, 1500, 4000, 10000].forEach((ms) => setTimeout(cancelAnimations, ms));
   }
 
   // Expose for testing
@@ -516,7 +646,8 @@
       processImage, replaceWithPlaceholder, replacedURLs,
       isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless,
       isSpacer, isAnimatedDataGif,
-      scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs
+      scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
+      cancelAnimations,
     };
   }
 
