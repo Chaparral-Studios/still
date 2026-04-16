@@ -483,9 +483,38 @@
   // --- CSS animation cancellation ---
 
   function cancelAnimations() {
+    // `Animation.cancel()` reverts the element to its PRE-animation style. For
+    // one-shot reveal animations (common WordPress pattern: `body { opacity: 0;
+    // animation: fadein 0.3s forwards; }`), that base style is invisible —
+    // cancelling leaves the whole page stuck at opacity:0. `finish()` jumps to
+    // the animation's end state instead, which respects `fill-mode: forwards`
+    // and leaves a fade-in at its final opacity:1.
+    //
+    // Rules:
+    //   - Infinite-iteration animations: cancel() — no meaningful end state,
+    //     and these are the ones we actually want to stop (spinners, loops).
+    //   - Finite with fill 'forwards' / 'both': finish() — respects author
+    //     intent that the end state persists.
+    //   - Everything else: cancel() — default revert is fine when the natural
+    //     state is post-animation anyway.
     try {
       for (const a of document.getAnimations({ subtree: true })) {
-        a.cancel();
+        try {
+          const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+            ? a.effect.getComputedTiming()
+            : null;
+          const iterations = timing && timing.iterations;
+          const fill = timing && timing.fill;
+          if (iterations === Infinity) {
+            a.cancel();
+          } else if (fill === 'forwards' || fill === 'both') {
+            a.finish();
+          } else {
+            a.cancel();
+          }
+        } catch (e) {
+          try { a.cancel(); } catch (e2) {}
+        }
       }
     } catch (e) {}
   }
