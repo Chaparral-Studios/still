@@ -26,6 +26,7 @@ const extArg = arg('ext');
 const extDir = extArg ? resolve(extArg) : null;
 const seconds = parseInt(arg('seconds', '30'), 10);
 const cookiesFile = arg('cookies');
+const noScroll = process.argv.includes('--no-scroll');
 
 mkdirSync(outDir, { recursive: true });
 
@@ -86,24 +87,36 @@ try {
 } catch (e) {
   console.error('goto failed:', (e as Error).message);
 }
+// Wait for actual content — goto on a JS-challenge page returns immediately with
+// an empty body; we want the real page before starting the measurement window.
+// 6s is a reasonable upper bound for challenge → hydration to complete.
+try {
+  await page.waitForFunction(() => (document.body?.innerText || '').length > 200, { timeout: 6000 });
+} catch {}
 const debug = {
   status: nav ? nav.status() : null,
   finalUrl: page.url(),
   title: await page.title().catch(() => null),
+  bodyTextLength: await page.evaluate(() => (document.body?.innerText || '').length).catch(() => 0),
   bodyTextSample: await page.evaluate(() => (document.body?.innerText || '').slice(0, 300)).catch(() => null),
 };
 writeFileSync(join(outDir, 'debug.json'), JSON.stringify(debug, null, 2));
 await page.screenshot({ path: join(outDir, 'debug-initial.png'), fullPage: false }).catch(() => {});
 
-// Scroll through the page to trigger lazy-loaded motion. Timestamps are seconds
-// since newPage() so they line up with ffmpeg's pts_time on the recording.
+// In scroll mode, scroll through the page to trigger lazy-loaded motion.
+// In --no-scroll mode, sit still — isolates pure ambient animation (no viewport
+// changes), producing a cleaner signal for "is this page animating?".
 const scrollTimes: number[] = [];
-const steps = Math.max(1, Math.floor(seconds / 3));
-for (let i = 0; i < steps; i++) {
-  const t = (Date.now() - tVideoStart) / 1000;
-  scrollTimes.push(t);
-  await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), i * 600);
-  await page.waitForTimeout(3000);
+if (noScroll) {
+  await page.waitForTimeout(seconds * 1000);
+} else {
+  const steps = Math.max(1, Math.floor(seconds / 3));
+  for (let i = 0; i < steps; i++) {
+    const t = (Date.now() - tVideoStart) / 1000;
+    scrollTimes.push(t);
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), i * 600);
+    await page.waitForTimeout(3000);
+  }
 }
 writeFileSync(join(outDir, 'scroll_times.json'), JSON.stringify({ scrollTimes }, null, 2));
 

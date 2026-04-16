@@ -69,8 +69,13 @@ const ys = kept.map((s) => s.y);
 const sum = ys.reduce((a, b) => a + b, 0);
 const mean = ys.length ? sum / ys.length : 0;
 const max = ys.length ? Math.max(...ys) : 0;
-// Fraction of frames with motion above a floor (0.5 YAVG ~ "something clearly moved").
-const moving = ys.filter((v) => v > 0.5).length;
+// Fraction of frames whose motion exceeds the VP8 encoder noise floor. Verified
+// empirically: at keyframe boundaries (~every 5s) we see motion=1.00 spikes, but
+// extracting those frames and pixel-diffing them shows byte-identical output
+// (i.e., compression quantization, not real content). 1.5 is a safe real-signal
+// threshold; anything under is encoder noise.
+const MOTION_FLOOR = 1.5;
+const moving = ys.filter((v) => v > MOTION_FLOOR).length;
 const movingPct = ys.length ? moving / ys.length : 0;
 
 const result = { frames: ys.length, maskedScrollFrames: masked, meanMotion: +mean.toFixed(3), maxMotion: +max.toFixed(3), movingFramesPct: +(movingPct * 100).toFixed(1) };

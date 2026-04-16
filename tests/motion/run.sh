@@ -8,7 +8,13 @@
 #   ./run.sh <url> [seconds]                # compare HEAD vs main
 #   MODE=single ./run.sh <url>              # just current tree
 #   MODE=baseline ./run.sh <url>            # add a "no extension" run
+#   MODE=sit ./run.sh <url> [seconds]       # no scrolling: isolates ambient motion
+#   MODE=sit-sweep ./run.sh <url>           # sit at 5/15/60s: catches slow cycles
 #   REF=<git-ref> ./run.sh <url>            # compare against a specific ref
+#
+# SIT mode produces the purest "is this page animating?" signal — scrolling
+# otherwise dominates the score. Try different seconds values to catch
+# animations on different timescales (5s for fast loops, 30s for slow crossfades).
 #
 # Site cookies (for bypassing bot walls / auth): place a Playwright cookie
 # JSON at tests/motion/cookies/<hostname>.json — it will be auto-loaded when
@@ -59,6 +65,19 @@ case "$MODE" in
   baseline)
     run_variant "none"
     run_variant "current" --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit)
+    run_variant "none" --no-scroll
+    run_variant "current" --no-scroll --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit-sweep)
+    # Sit at three durations. Short (5s) catches fast loops; medium (15s) catches
+    # mid-cycle animations; long (60s) catches slow breathing/tint cycles.
+    for dur in 5 15 60; do
+      SECONDS_RUN="$dur"
+      run_variant "none_${dur}s"    --no-scroll
+      run_variant "current_${dur}s" --no-scroll --ext "$REPO_ROOT/web-extension"
+    done
     ;;
   compare|*)
     # Ensure ref worktree exists at $REF.
