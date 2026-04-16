@@ -23,7 +23,9 @@ REF="${REF:-main}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-REF_WT="/tmp/still-motion-ref-wt"
+# Hash the repo root so multiple clones or users on one machine don't collide.
+REPO_HASH="$(echo -n "$REPO_ROOT" | shasum | cut -c1-8)"
+REF_WT="${TMPDIR:-/tmp}/still-motion-ref-wt-${REPO_HASH}"
 
 # Auto-pick cookies by hostname.
 HOST="$(echo "$URL" | sed -E 's#https?://##; s#/.*##' | sed 's/^www\.//')"
