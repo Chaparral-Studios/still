@@ -458,6 +458,49 @@ test.describe('Still — block and replace logic', () => {
     expect(parseFloat(opacity)).toBe(1);
   });
 
+  test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
+    // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
+    // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is
+    // visible motion that could trigger a migraine-sensitive user. The CSS
+    // `animation-duration: 0s !important` override should make the fade-in
+    // reach its end state on frame 1 with no intermediate rendering.
+    await injectContentScript(page);
+    // Inject the content script + sampler as part of the initial HTML so they
+    // are in place by the time the browser begins rendering the animated body.
+    // This mirrors how the real extension runs at document_start.
+    const fs = require('fs');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${contentJs}</script>
+      <style>
+        @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+        body { opacity: 0; animation: fadein 300ms forwards; }
+      </style>
+      <body>hello</body>
+      <script>
+        window.__opacitySamples = [];
+        (function s() {
+          window.__opacitySamples.push({
+            t: performance.now(),
+            opacity: parseFloat(getComputedStyle(document.body).opacity),
+          });
+          requestAnimationFrame(s);
+        })();
+      </script>
+    `);
+    // Wait past the natural animation duration so any intermediate frames
+    // would certainly have been captured by the sampler.
+    await page.waitForTimeout(600);
+    const samples = await page.evaluate(() => window.__opacitySamples);
+    expect(samples.length).toBeGreaterThan(10); // sampler captured ~60fps × 0.6s
+    const intermediate = samples.filter((s) => s.opacity > 0 && s.opacity < 1);
+    // No sampled frame should have opacity strictly between 0 and 1.
+    expect(intermediate).toEqual([]);
+    // Final sample should be at the end state (opacity 1).
+    expect(samples[samples.length - 1].opacity).toBe(1);
+  });
+
   test('cancelAnimations branches correctly on infinite-iteration WAAPI loops', async ({ page }) => {
     // Black-box test of the selective killing logic: infinite loops are
     // cancelled, forwards-fill animations are finished. Rather than rely on

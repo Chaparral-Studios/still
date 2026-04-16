@@ -30,8 +30,19 @@
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
-    // Kill all CSS transitions — prevents smooth crossfades, carousel glides, etc.
-    '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Kill CSS transitions AND animations at the CSS level so they can never
+    // produce visible motion — even during the brief window before our JS
+    // cancelAnimations() runs. animation-duration: 0s makes the animation
+    // "run" in zero time, so it's rendered at its end state on the first
+    // paint. animation-fill-mode: forwards ensures the end state persists
+    // (without it, the 0s animation completes and reverts to the pre-anim
+    // style — which is how we got the fade-in-reveal blank-page bug).
+    '*, *::before, *::after {',
+    '  transition-duration: 0s !important;',
+    '  animation-duration: 0s !important;',
+    '  animation-delay: 0s !important;',
+    '  animation-fill-mode: forwards !important;',
+    '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
