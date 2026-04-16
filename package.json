@@ -9,10 +9,20 @@
     "convert:macos": "xcrun safari-web-extension-converter web-extension/ --project-location StillMac/ --app-name Still --bundle-identifier com.jonbaker.still --macos-only --no-open",
     "convert:all": "xcrun safari-web-extension-converter web-extension/ --project-location StillUniversal/ --app-name Still --bundle-identifier com.jonbaker.still --no-open"
   },
-  "keywords": ["safari", "extension", "gif", "animation"],
+  "keywords": [
+    "safari",
+    "extension",
+    "gif",
+    "animation"
+  ],
   "author": "Jon Baker",
   "license": "ISC",
   "devDependencies": {
-    "@playwright/test": "^1.58.2"
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.6.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
   }
 }

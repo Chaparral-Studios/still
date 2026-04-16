@@ -26,11 +26,37 @@ A cross-browser extension that blocks animated images (GIF, WebP, APNG), replaci
 npm test                    # or: npx playwright test
 npm run test:headed         # headed mode
 
+# Motion testing harness — headless, safe for migraine-sensitive iteration.
+# Records a site in headless Chromium and frame-diffs the video. See
+# tests/motion/README.md for the full cookie-capture + run flow.
+./tests/motion/run.sh <url>                    # compare current tree vs main
+MODE=baseline ./tests/motion/run.sh <url>      # add a no-extension run
+MODE=single   ./tests/motion/run.sh <url>      # current tree only
+
 # Convert web extension to Safari Xcode projects
 npm run convert:ios
 npm run convert:macos
 npm run convert:all
 ```
+
+## Release process
+
+`main` is the development trunk — merging here does NOT ship. Xcode Cloud's
+"Default" workflow is configured to trigger on **tag pushes matching `v*`**
+(Start Conditions → Tag Changes). Until a tag is pushed, nothing goes to
+App Store Connect or TestFlight.
+
+To cut a release:
+
+```bash
+# on main, after the changes you want to ship are merged
+git tag v1.2.0
+git push origin v1.2.0
+# → Xcode Cloud archives, submits to App Store Connect, posts to TestFlight Internal
+```
+
+Do not push tags casually. Do not re-enable the "Branch Changes: main"
+start condition — it would make every merge ship.
 
 ## Important
 
