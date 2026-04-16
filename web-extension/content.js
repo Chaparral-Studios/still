@@ -30,15 +30,18 @@
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
-    // Kill CSS transitions AND animations at the CSS level so they can never
-    // produce visible motion — even during the brief window before our JS
-    // cancelAnimations() runs. animation-duration: 0s makes the animation
-    // "run" in zero time, so it's rendered at its end state on the first
-    // paint. animation-fill-mode: forwards ensures the end state persists
-    // (without it, the 0s animation completes and reverts to the pre-anim
-    // style — which is how we got the fade-in-reveal blank-page bug).
-    '*, *::before, *::after {',
-    '  transition-duration: 0s !important;',
+    // Kill all CSS transitions so style changes are instant (prevents smooth
+    // crossfades, carousel glides, etc.).
+    '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Kill animations ONLY on html/body. Universal `animation-duration: 0s`
+    // breaks sites that animate interior elements (page icons, filter chips,
+    // etc.) from a larger staging state to their resting size — tested and
+    // confirmed on vons.com. Scoping to html/body is enough to kill the
+    // common "body fade-in reveal" pattern (WordPress pattern that hid the
+    // whole page on nplusonemag.com) without affecting page-internal
+    // animations. JS cancelAnimations() handles other page-level concerns
+    // with selective finish/cancel semantics.
+    'html, body {',
     '  animation-duration: 0s !important;',
     '  animation-delay: 0s !important;',
     '  animation-fill-mode: forwards !important;',
