@@ -470,6 +470,11 @@
     scanBackgroundImages();
     killSVGAnimations();
     pauseVideos();
+    // Also re-run cancelAnimations on every scan so late-arriving animations
+    // (async-loaded widgets like Fidelity's SVG pie chart that kicks in after
+    // the data finishes loading — well past DOMContentLoaded) get caught as
+    // soon as the MutationObserver notices the SVG being injected.
+    cancelAnimations();
   }
 
   // --- MutationObserver ---
@@ -552,20 +557,22 @@
   // --- CSS animation cancellation ---
 
   function cancelAnimations() {
-    // `Animation.cancel()` reverts the element to its PRE-animation style. For
-    // one-shot reveal animations (common WordPress pattern: `body { opacity: 0;
-    // animation: fadein 0.3s forwards; }`), that base style is invisible —
-    // cancelling leaves the whole page stuck at opacity:0. `finish()` jumps to
-    // the animation's end state instead, which respects `fill-mode: forwards`
-    // and leaves a fade-in at its final opacity:1.
+    // `Animation.cancel()` reverts to PRE-animation style. `finish()` jumps to
+    // the end of the active duration — but for a finite animation with fill:none
+    // (default), once the active period ends the animated properties no longer
+    // apply and the element reverts anyway. To reliably "snap to the end state"
+    // regardless of the author's fill mode (the migraine-safety goal: "show
+    // whatever the animation is progressing toward"), we upgrade fill to
+    // 'forwards' via updateTiming() before calling finish(). This works for
+    // Fidelity-style SVG stroke-dashoffset reveals (pie chart fill animation)
+    // where the author didn't set fill: forwards — the animated pie stays fully
+    // drawn instead of reverting to an invisible base.
     //
     // Rules:
-    //   - Infinite-iteration animations: cancel() — no meaningful end state,
-    //     and these are the ones we actually want to stop (spinners, loops).
-    //   - Finite with fill 'forwards' / 'both': finish() — respects author
-    //     intent that the end state persists.
-    //   - Everything else: cancel() — default revert is fine when the natural
-    //     state is post-animation anyway.
+    //   - Infinite iterations: cancel() — no meaningful end state; these are the
+    //     ones we actually want to stop outright (spinners, loops).
+    //   - Finite with any fill mode: upgrade to fill:forwards + finish() —
+    //     snaps instantly to the animation's end state and keeps it there.
     try {
       for (const a of document.getAnimations({ subtree: true })) {
         try {
@@ -573,10 +580,12 @@
             ? a.effect.getComputedTiming()
             : null;
           const iterations = timing && timing.iterations;
-          const fill = timing && timing.fill;
           if (iterations === Infinity) {
             a.cancel();
-          } else if (fill === 'forwards' || fill === 'both') {
+          } else if (a.effect && typeof a.effect.updateTiming === 'function') {
+            // Force fill to forwards so the end state persists post-finish,
+            // even if the author specified fill: none (default).
+            try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
             a.finish();
           } else {
             a.cancel();
@@ -606,6 +615,13 @@
     }
 
     window.addEventListener('load', scanAll);
+
+    // Backup cancellation passes for animations that appear after all the
+    // usual hooks (lazy widgets, dashboards that load data async then render
+    // an animated SVG, etc.). Cheap — cancelAnimations is just a
+    // document.getAnimations() iteration; if there's nothing to cancel these
+    // are near no-ops.
+    [500, 1500, 4000, 10000].forEach((ms) => setTimeout(cancelAnimations, ms));
   }
 
   // Expose for testing
