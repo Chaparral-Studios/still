@@ -561,6 +561,80 @@ test.describe('Still — block and replace logic', () => {
     expect(src).toMatch(/^data:image\/svg\+xml/); // replaced, not leaked
   });
 
+  test('extensionless URL serving animated GIF: no visible-render window before block', async ({ page }) => {
+    // Extensionless URLs (image CDNs that strip .gif/.webp, proxied images, etc.)
+    // bypass our document_start CSS hide rule because the rule pattern-matches
+    // on URL extension. Between the browser starting to decode the image and
+    // our Path E probe setting visibility:hidden, there is a theoretical
+    // window where an animated frame could paint.
+    //
+    // This test exercises that race: install a rAF sampler that records img
+    // state every paint; serve an actually-animated GIF at an extensionless
+    // URL; fail if any sample shows the img in a "visible AND loaded AND not
+    // yet classified-by-extension" state — i.e., a state where pixels from
+    // the animated GIF could have been on-screen.
+    await injectContentScript(page);
+    const fs = require('fs');
+    const path = require('path');
+    const gifBytes = fs.readFileSync(path.resolve(__dirname, 'fixtures', 'animated.gif'));
+    // Serve the animated GIF at an extensionless path off baseURL so relative
+    // resolution works against a real origin.
+    await page.route(`${baseURL}/api/image/abc`, (route) =>
+      route.fulfill({ status: 200, contentType: 'image/gif', body: gifBytes })
+    );
+    // Navigate to baseURL first so setContent keeps that origin and the
+    // relative img URL resolves against it.
+    await page.goto(baseURL + '/test-page.html');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${contentJs}</script>
+      <body>
+        <img id="ext-img" src="${baseURL}/api/image/abc" style="width:200px;height:150px">
+      </body>
+      <script>
+        window.__samples = [];
+        (function s() {
+          const img = document.getElementById('ext-img');
+          if (img) {
+            window.__samples.push({
+              t: performance.now(),
+              visibility: getComputedStyle(img).visibility,
+              dataStill: img.dataset.still || null,
+              naturalWidth: img.naturalWidth,
+              complete: img.complete,
+            });
+          }
+          requestAnimationFrame(s);
+        })();
+      </script>
+    `);
+    // Give the extension time to probe and replace the image.
+    await page.waitForTimeout(2000);
+    const samples = await page.evaluate(() => window.__samples);
+    expect(samples.length).toBeGreaterThan(10); // sampler ran
+
+    // A sample is a "potential leak" iff the browser would have painted
+    // real animated pixels at that moment:
+    //   - visibility is 'visible' (browser would render)
+    //   - naturalWidth > 1 (decoded enough to have a real picture, not 1×1)
+    //   - dataStill not in {replacing, replaced} (our replacement hasn't
+    //     happened yet, so any rendered pixels are from the original resource).
+    //
+    // A leaked sample would also need naturalWidth to reflect the ORIGINAL
+    // image's dimensions, not our placeholder SVG's. The placeholder SVG is
+    // 150×? so we additionally require naturalWidth to match the animated.gif
+    // fixture's dimensions to avoid false positives from samples taken right
+    // after replacement.
+    const leaks = samples.filter(
+      (s) =>
+        s.visibility === 'visible' &&
+        s.naturalWidth > 1 &&
+        !['replacing', 'replaced'].includes(s.dataStill)
+    );
+    expect(leaks).toEqual([]);
+  });
+
   test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
     // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
     // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is
