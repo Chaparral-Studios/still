@@ -9,3 +9,6 @@ build/
 # Motion harness artifacts
 tests/motion/reports/
 tests/motion/cookies/
+
+# Claude Code local state
+.claude/
