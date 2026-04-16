@@ -458,6 +458,45 @@ test.describe('Still — block and replace logic', () => {
     expect(parseFloat(opacity)).toBe(1);
   });
 
+  test('does NOT replace lazy-load placeholder GIF when data-src points at real image (macrumors pattern)', async ({ page }) => {
+    // macrumors.com (and many WordPress-style sites) use this lazy-load pattern:
+    // <img src="/images-new/1x1.trans.gif" data-src="https://cdn.../real.jpg">
+    // with CSS-applied dimensions (e.g., 697×392). Our naturalWidth-based
+    // spacer check misses it because at scan time the 1x1 GIF may not have
+    // loaded yet, so we'd otherwise incorrectly mark it as replaced and the
+    // src-setter override would block the page's lazy swap.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-lazy-placeholder';
+      img.src = base + '/fixtures/1x1.trans.gif';
+      img.setAttribute('data-src', base + '/fixtures/static.png');
+      img.style.width = '697px';
+      img.style.height = '392px';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForTimeout(500);
+    const state = await page.$eval('#img-lazy-placeholder', (el) => ({
+      still: el.dataset.still,
+      src: el.src,
+    }));
+    // Should be marked static (we recognized the lazy-load pattern), not replaced.
+    expect(state.still).not.toBe('replaced');
+    // Simulate the page's lazy-load JS swapping in the real URL.
+    await page.evaluate((base) => {
+      const img = document.getElementById('img-lazy-placeholder');
+      img.src = base + '/fixtures/static.png';
+    }, baseURL);
+    await page.waitForTimeout(200);
+    // The real src must have actually taken — our setter override shouldn't
+    // have blocked it. static.png is a jpg/png, so processImage should hit
+    // the "static extension" skip path and leave it visible.
+    const finalSrc = await page.$eval('#img-lazy-placeholder', (el) => el.src);
+    expect(finalSrc).toMatch(/static\.png/);
+  });
+
   test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
     // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
     // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is
