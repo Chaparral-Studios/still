@@ -771,6 +771,90 @@ test.describe('Still — block and replace logic', () => {
     fs.rmSync(videoDir, { recursive: true, force: true });
   });
 
+  test('rAF-driven SVG path `d` mutation reveal must be hidden until settled (Fidelity pie chart pattern)', async ({ page }) => {
+    // Verified via live DOM inspection on digital.fidelity.com: their Goals
+    // widget donut chart is drawn by a library that recomputes an SVG <path>'s
+    // `d` attribute every rAF tick — gradually sweeping the arc geometry from
+    // 0° to the final angle over ~1 second. Neither CSS @keyframes overrides,
+    // WAAPI cancellation, nor stroke-dashoffset rules touch this because the
+    // path geometry ITSELF is changing.
+    //
+    // This test simulates the pattern: inject an SVG path, then in a rAF loop
+    // mutate its `d` attribute with progressively-larger arcs. The extension
+    // must hide the path (visibility: hidden via data-still-svg-settling) for
+    // the duration of the mutations, then reveal it once `d` stops changing.
+    // We assert that at NO rAF sample did the path have visibility:visible
+    // while its `d` was in flux.
+    const fs = require('fs');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        // Inline the browser-API mock BEFORE content.js. For tests that
+        // injectContentScript via addInitScript, the init script sometimes
+        // doesn't fire in time for setContent-embedded scripts that run at
+        // parse time. Inlining the mock avoids that race.
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${contentJs}</script>
+      <body style="margin:0;background:#fff;">
+        <svg width="200" height="200" viewBox="0 0 100 100">
+          <path id="p" d="M 50 50 L 50 10 A 40 40 0 0 1 50 10 Z" fill="#2a5"></path>
+        </svg>
+        <script>
+          window.__dSamples = [];
+          const p = document.getElementById('p');
+          // Delay animator start until content.js has fully initialized
+          // (which includes installing the MutationObserver that watches for
+          // d-attribute mutations).
+          function whenReady(fn) {
+            if (window.__still) return fn();
+            requestAnimationFrame(() => whenReady(fn));
+          }
+          whenReady(() => {
+            const tStart = performance.now();
+            const DURATION = 1000;
+            function tick(now) {
+              const progress = Math.min(1, (now - tStart) / DURATION);
+              const endAngle = progress * 270 * Math.PI / 180;
+              const x = 50 + 40 * Math.sin(endAngle);
+              const y = 50 - 40 * Math.cos(endAngle);
+              const large = endAngle > Math.PI ? 1 : 0;
+              const d = \`M 50 50 L 50 10 A 40 40 0 \${large} 1 \${x} \${y} Z\`;
+              p.setAttribute('d', d);
+              window.__dSamples.push({
+                t: now - tStart,
+                visibility: getComputedStyle(p).visibility,
+              });
+              if (progress < 1) requestAnimationFrame(tick);
+            }
+            requestAnimationFrame(tick);
+          });
+        </script>
+      </body>
+    `);
+    // Wait past animation + settle.
+    await page.waitForTimeout(1800);
+    const samples = await page.evaluate(() => window.__dSamples);
+    expect(samples.length).toBeGreaterThan(10);
+    // During the animation window (progress < 1, so t < 1000ms), samples
+    // should show visibility: hidden — the extension caught the d mutation.
+    const duringAnimation = samples.filter((s) => s.t < 900);
+    const visibleDuringAnim = duringAnimation.filter((s) => s.visibility === 'visible');
+    expect(visibleDuringAnim).toEqual([]);
+    // After settle (300ms of no mutation), the path should be visible again.
+    const finalVisibility = await page.evaluate(
+      () => getComputedStyle(document.getElementById('p')).visibility
+    );
+    expect(finalVisibility).toBe('visible');
+  });
+
   test('fade-in animations produce no visible intermediate opacity frames', async ({ page }) => {
     // Stronger-than-end-state test: body opacity must NEVER be between 0 and 1
     // at any rAF tick during page load. Even a 20ms flash of opacity:0.3 is

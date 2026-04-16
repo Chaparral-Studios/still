@@ -33,18 +33,20 @@
     // Kill all CSS transitions so style changes are instant (prevents smooth
     // crossfades, carousel glides, etc.).
     '*, *::before, *::after { transition-duration: 0s !important; }',
-    // Kill animations ONLY on html/body. Universal `animation-duration: 0s`
-    // breaks sites that animate interior elements (page icons, filter chips,
-    // etc.) from a larger staging state to their resting size — tested and
-    // confirmed on vons.com. Scoping to html/body is enough to kill the
-    // common "body fade-in reveal" pattern (WordPress pattern that hid the
-    // whole page on nplusonemag.com) without affecting page-internal
-    // animations. JS cancelAnimations() handles other page-level concerns
-    // with selective finish/cancel semantics.
+    // Kill animations ONLY on html/body (covers WordPress body fade-in reveal
+    // pattern that hid the whole page on nplusonemag.com). JS cancelAnimations
+    // handles other page-level animations via updateTiming+finish.
     'html, body {',
     '  animation-duration: 0s !important;',
     '  animation-delay: 0s !important;',
     '  animation-fill-mode: forwards !important;',
+    '}',
+    // SVG path d-attribute mutation reveal animations (D3-style charts like
+    // Fidelity's Goals pie chart) get hidden during their active period and
+    // revealed only once `d` has stabilized — see observeMutations for the
+    // settle-tracking logic. This CSS rule is the hide mechanism.
+    'svg [data-still-svg-settling] {',
+    '  visibility: hidden !important;',
     '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
@@ -550,9 +552,72 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset']
+      attributeFilter: ['src', 'srcset', 'd']
     });
+
   }
+
+  // --- D3-style chart animation defusal ---
+  // Some chart libraries animate reveals by mutating an SVG path's `d`
+  // attribute each frame (recomputing the arc geometry over ~1s). This
+  // bypasses CSS animation overrides, WAAPI cancellation, and
+  // stroke-dashoffset rules entirely. Our fix: monkey-patch
+  // Element.prototype.setAttribute so that setting `d` on any SVGElement
+  // synchronously adds a `data-still-svg-settling` attribute (hidden via
+  // CSS). A debounced timer unhides the element once `d` has stopped
+  // changing for SETTLE_MS — meaning the chart has reached its final state.
+  //
+  // We use a prototype patch rather than a MutationObserver because
+  // MutationObserver callbacks fire as microtasks AFTER the setAttribute
+  // call returns, creating a one-rAF window in which the path renders
+  // partially drawn before we can hide it. The sync patch closes that race.
+  //
+  // The patch is narrow: only intervenes on `d` attribute writes to SVG
+  // elements, so non-SVG setAttribute calls are unaffected.
+  (function patchSetAttributeForSvgD() {
+    const SETTLE_MS = 300;
+    const svgSettleTimers = new WeakMap();
+    const origSetAttribute = Element.prototype.setAttribute;
+    const origSetAttributeNS = Element.prototype.setAttributeNS;
+
+    function markSettling(el) {
+      origSetAttribute.call(el, 'data-still-svg-settling', '');
+      const existing = svgSettleTimers.get(el);
+      if (existing) clearTimeout(existing);
+      const t = setTimeout(() => {
+        el.removeAttribute('data-still-svg-settling');
+        svgSettleTimers.delete(el);
+      }, SETTLE_MS);
+      svgSettleTimers.set(el, t);
+    }
+
+    Element.prototype.setAttribute = function (name, value) {
+      // Catch any attribute change that could be a geometry-animation driver:
+      // `d` on path, `cx`/`cy`/`r` on circle, `x`/`y`/`width`/`height` on rect,
+      // `points` on polyline/polygon, or `transform` on anything SVG.
+      if (this instanceof SVGElement && (
+        name === 'd' || name === 'points' || name === 'transform' ||
+        name === 'cx' || name === 'cy' || name === 'r' || name === 'rx' || name === 'ry' ||
+        name === 'x' || name === 'y' || name === 'width' || name === 'height' ||
+        name === 'x1' || name === 'y1' || name === 'x2' || name === 'y2'
+      )) {
+        markSettling(this);
+      }
+      return origSetAttribute.apply(this, arguments);
+    };
+
+    Element.prototype.setAttributeNS = function (ns, name, value) {
+      if (this instanceof SVGElement && (
+        name === 'd' || name === 'points' || name === 'transform' ||
+        name === 'cx' || name === 'cy' || name === 'r' || name === 'rx' || name === 'ry' ||
+        name === 'x' || name === 'y' || name === 'width' || name === 'height' ||
+        name === 'x1' || name === 'y1' || name === 'x2' || name === 'y2'
+      )) {
+        markSettling(this);
+      }
+      return origSetAttributeNS.apply(this, arguments);
+    };
+  })();
 
   // --- CSS animation cancellation ---
 
