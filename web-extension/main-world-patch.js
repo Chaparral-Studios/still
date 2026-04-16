@@ -24,11 +24,16 @@
   const origSetAttribute = Element.prototype.setAttribute;
   const origSetAttributeNS = Element.prototype.setAttributeNS;
 
-  // Common SVG geometry attributes that chart libraries animate.
+  // SVG geometry attributes that chart libraries animate. We keep this list
+  // narrow on purpose — including `x`, `y`, `width`, `height` would catch bar-
+  // chart reveal animations but also trigger 300ms hides on static SVG icons
+  // that frameworks (React hydration, etc.) re-apply those attrs to during
+  // mount. That flash-of-hidden-content across potentially every icon on a
+  // page isn't worth the coverage. Chart libraries targeting those attrs
+  // specifically will slip through; revisit if reported.
   const GEOM_ATTRS = new Set([
     'd', 'points', 'transform',
     'cx', 'cy', 'r', 'rx', 'ry',
-    'x', 'y', 'width', 'height',
     'x1', 'y1', 'x2', 'y2',
   ]);
 

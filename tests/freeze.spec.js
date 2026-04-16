@@ -904,16 +904,35 @@ test.describe('Still — block and replace logic', () => {
     expect(samples[samples.length - 1].opacity).toBe(1);
   });
 
-  test('cancelAnimations branches correctly on infinite-iteration WAAPI loops', async ({ page }) => {
-    // Black-box test of the selective killing logic: infinite loops are
-    // cancelled, forwards-fill animations are finished. Rather than rely on
-    // cancelAnimations() being auto-invoked at the exact time the animation
-    // is registered (flaky depending on init timing in the test harness), we
-    // drive the logic directly by replicating it here and verifying the
-    // WAAPI semantics match our content.js implementation.
-    await injectContentScript(page);
-    await page.setContent('<body><div id="s" style="width:40px;height:40px"></div></body>');
-    await page.addScriptTag({ path: CONTENT_SCRIPT });
+  test('cancelAnimations (real extension code) handles infinite, forwards, and fill:none animations', async ({ page }) => {
+    // Black-box test of the actual cancelAnimations() logic in content.js —
+    // invoked via window.__still to avoid the earlier version's mistake of
+    // replicating the kill logic inline in the test (which missed the
+    // fill-upgrade path that the real code has for non-forwards animations).
+    //
+    // Three animations exercise the three branches:
+    //   - inf:  infinite iterations      → expected cancel (idle)
+    //   - fwd:  finite, fill: 'forwards' → expected finish, stays at end
+    //   - none: finite, fill: 'none'     → expected fill-upgrade + finish,
+    //                                      end state persists (the bug-fix
+    //                                      branch that had no prior coverage)
+    const fs = require('fs');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${contentJs}</script>
+      <body><div id="s" style="width:40px;height:40px"></div></body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
     const result = await page.evaluate(() => {
       const el = document.getElementById('s');
       const inf = el.animate(
@@ -924,16 +943,26 @@ test.describe('Still — block and replace logic', () => {
         [{ opacity: 0 }, { opacity: 1 }],
         { duration: 1000, fill: 'forwards' }
       );
-      // Apply the same kill logic content.js uses.
-      for (const a of document.getAnimations()) {
-        const timing = a.effect && a.effect.getComputedTiming();
-        if (timing && timing.iterations === Infinity) a.cancel();
-        else if (timing && (timing.fill === 'forwards' || timing.fill === 'both')) a.finish();
-        else a.cancel();
-      }
-      return { infState: inf.playState, fwdState: fwd.playState };
+      const none = el.animate(
+        [{ color: 'red' }, { color: 'blue' }],
+        { duration: 1000, fill: 'none' }  // explicit default; upgrade path
+      );
+      // Invoke the real cancelAnimations from content.js.
+      window.__still.cancelAnimations();
+      return {
+        infState: inf.playState,
+        fwdState: fwd.playState,
+        noneState: none.playState,
+        // After cancelAnimations, check the end state of the fill:none
+        // animation: fill should have been upgraded to 'forwards'.
+        noneFill: none.effect.getComputedTiming().fill,
+      };
     });
-    expect(result.infState).toBe('idle');    // infinite was cancelled
-    expect(result.fwdState).toBe('finished'); // forwards-fill was finished
+    expect(result.infState).toBe('idle');      // infinite was cancelled
+    expect(result.fwdState).toBe('finished');  // forwards-fill finished
+    expect(result.noneState).toBe('finished'); // fill:none also finished
+    // Fill should be upgraded from 'none' to 'forwards' so the end state
+    // persists after currentTime == duration.
+    expect(result.noneFill).toBe('forwards');
   });
 });

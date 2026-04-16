@@ -646,7 +646,8 @@
       processImage, replaceWithPlaceholder, replacedURLs,
       isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless,
       isSpacer, isAnimatedDataGif,
-      scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs
+      scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
+      cancelAnimations,
     };
   }
 
