@@ -10,6 +10,11 @@
 #   MODE=baseline ./run.sh <url>            # add a "no extension" run
 #   MODE=sit ./run.sh <url> [seconds]       # no scrolling: isolates ambient motion
 #   MODE=sit-sweep ./run.sh <url>           # sit at 5/15/60s: catches slow cycles
+#   MODE=scroll-sit ./run.sh <url> [sec]    # scroll through 4 positions, then sit:
+#                                           # catches in-view/lazy-load animations
+#   MODE=sit-png ./run.sh <url> [sec]       # lossless PNG capture, sit mode:
+#                                           # catches sub-encoder-floor signal
+#                                           # (subpixel AA jitter, slow hue drift)
 #   REF=<git-ref> ./run.sh <url>            # compare against a specific ref
 #
 # SIT mode produces the purest "is this page animating?" signal — scrolling
@@ -78,6 +83,14 @@ case "$MODE" in
       run_variant "none_${dur}s"    --no-scroll
       run_variant "current_${dur}s" --no-scroll --ext "$REPO_ROOT/web-extension"
     done
+    ;;
+  scroll-sit)
+    run_variant "none"    --scroll-then-sit
+    run_variant "current" --scroll-then-sit --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit-png)
+    run_variant "none"    --no-scroll --png-capture
+    run_variant "current" --no-scroll --png-capture --ext "$REPO_ROOT/web-extension"
     ;;
   compare|*)
     # Ensure ref worktree exists at $REF.

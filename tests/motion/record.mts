@@ -27,6 +27,19 @@ const extDir = extArg ? resolve(extArg) : null;
 const seconds = parseInt(arg('seconds', '30'), 10);
 const cookiesFile = arg('cookies');
 const noScroll = process.argv.includes('--no-scroll');
+// "scroll-then-sit" mode: scroll through a handful of viewport positions with
+// short pauses, then sit still for the rest of the duration. Catches animations
+// that are triggered by new content coming into view (IntersectionObserver-driven
+// carousels, lazy-loaded Lottie, in-view parallax) which idle sit-mode misses.
+const scrollThenSit = process.argv.includes('--scroll-then-sit');
+// PNG-capture mode: instead of a lossy VP8 WebM, write a PNG per tick. Losseless,
+// no chroma subsampling — required for detecting sub-1-luminance-unit signal
+// (subpixel AA jitter, slow hue drift). Only valid with --no-scroll for now.
+const pngCapture = process.argv.includes('--png-capture');
+if (pngCapture && !noScroll) {
+  console.error('--png-capture currently requires --no-scroll (sit mode)');
+  process.exit(1);
+}
 
 mkdirSync(outDir, { recursive: true });
 
@@ -55,7 +68,9 @@ const context = await chromium.launchPersistentContext(userDataDir, {
   headless: false,
   args: launchArgs,
   viewport,
-  recordVideo: { dir: outDir, size: viewport },
+  // Skip WebM in PNG-capture mode to halve the work and ensure no encoder
+  // interference with the screenshot stream.
+  ...(pngCapture ? {} : { recordVideo: { dir: outDir, size: viewport } }),
 });
 
 if (cookiesFile && existsSync(cookiesFile)) {
@@ -103,13 +118,47 @@ const debug = {
 writeFileSync(join(outDir, 'debug.json'), JSON.stringify(debug, null, 2));
 await page.screenshot({ path: join(outDir, 'debug-initial.png'), fullPage: false }).catch(() => {});
 
-// In scroll mode, scroll through the page to trigger lazy-loaded motion.
-// In --no-scroll mode, sit still — isolates pure ambient animation (no viewport
-// changes), producing a cleaner signal for "is this page animating?".
 const scrollTimes: number[] = [];
-if (noScroll) {
+if (pngCapture) {
+  // Lossless PNG capture loop at ~10fps best-effort. page.screenshot reads the
+  // compositor buffer via CDP without triggering a repaint, so this shouldn't
+  // itself cause motion. Frame timestamps are recorded relative to capture
+  // start (reset here so analysis lines up with captures, not page.goto).
+  const framesDir = join(outDir, 'frames');
+  mkdirSync(framesDir, { recursive: true });
+  const tCaptureStart = Date.now();
+  const frameTimes: { idx: number; t: number }[] = [];
+  const endAt = tCaptureStart + seconds * 1000;
+  let idx = 0;
+  while (Date.now() < endAt) {
+    const t = (Date.now() - tCaptureStart) / 1000;
+    const p = join(framesDir, String(idx).padStart(6, '0') + '.png');
+    await page.screenshot({ path: p, fullPage: false });
+    frameTimes.push({ idx, t });
+    idx++;
+    await page.waitForTimeout(100);
+  }
+  writeFileSync(join(outDir, 'frame_times.json'), JSON.stringify({ frameTimes }, null, 2));
+} else if (noScroll) {
+  // Pure sit: isolates ambient animation, no viewport changes.
   await page.waitForTimeout(seconds * 1000);
+} else if (scrollThenSit) {
+  // Scroll through 4 viewport positions with short pauses to trigger in-view
+  // animations, then sit still for the remaining budget. Any motion after the
+  // final scroll is settle-triggered animation (lazy carousels, parallax,
+  // IntersectionObserver callbacks) that idle sit-mode would never see.
+  const positions = [600, 1200, 1800, 2400];
+  const scrollPhase = 1.0; // 1s per scroll step
+  for (const y of positions) {
+    const t = (Date.now() - tVideoStart) / 1000;
+    scrollTimes.push(t);
+    await page.evaluate((yy) => window.scrollTo({ top: yy, behavior: 'instant' }), y);
+    await page.waitForTimeout(scrollPhase * 1000);
+  }
+  const sitBudget = Math.max(1, seconds - positions.length * scrollPhase);
+  await page.waitForTimeout(sitBudget * 1000);
 } else {
+  // Continuous-scroll mode: scroll every 3s for the full duration.
   const steps = Math.max(1, Math.floor(seconds / 3));
   for (let i = 0; i < steps; i++) {
     const t = (Date.now() - tVideoStart) / 1000;
@@ -123,12 +172,16 @@ writeFileSync(join(outDir, 'scroll_times.json'), JSON.stringify({ scrollTimes },
 await page.close();
 await context.close();
 
-// Playwright names the video with a random id; rename to recording.webm.
-const files = readdirSync(outDir).filter((f) => f.endsWith('.webm'));
-if (files.length) {
-  renameSync(join(outDir, files[0]), join(outDir, 'recording.webm'));
-  console.log('wrote', join(outDir, 'recording.webm'));
+if (pngCapture) {
+  console.log('wrote', join(outDir, 'frames'));
 } else {
-  console.error('no video produced');
-  process.exit(2);
+  // Playwright names the video with a random id; rename to recording.webm.
+  const files = readdirSync(outDir).filter((f) => f.endsWith('.webm'));
+  if (files.length) {
+    renameSync(join(outDir, files[0]), join(outDir, 'recording.webm'));
+    console.log('wrote', join(outDir, 'recording.webm'));
+  } else {
+    console.error('no video produced');
+    process.exit(2);
+  }
 }

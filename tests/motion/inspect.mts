@@ -14,7 +14,7 @@
 // Usage: tsx inspect.mts --in <report-dir> [--top 5]
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 function arg(name: string): string | undefined;
@@ -29,11 +29,34 @@ if (!inArg) { console.error('--in required'); process.exit(1); }
 const dir = resolve(inArg);
 const topN = parseInt(arg('top', '5'), 10);
 const video = join(dir, 'recording.webm');
+const framesDir = join(dir, 'frames');
+const frameTimesFile = join(dir, 'frame_times.json');
 const csvPath = join(dir, 'motion.csv');
 const scrollFile = join(dir, 'scroll_times.json');
 
-if (!existsSync(video) || !existsSync(csvPath)) {
-  console.error('need recording.webm and motion.csv in', dir); process.exit(1);
+const useFrames = existsSync(framesDir) && existsSync(frameTimesFile);
+if (!existsSync(csvPath) || (!useFrames && !existsSync(video))) {
+  console.error('need motion.csv plus either recording.webm or frames/+frame_times.json in', dir);
+  process.exit(1);
+}
+
+// If PNG sourced, build a (t → index) lookup so we can fetch the nearest captured
+// frame for any motion.csv timestamp.
+type FrameTime = { idx: number; t: number };
+const frameTimes: FrameTime[] = useFrames
+  ? JSON.parse(readFileSync(frameTimesFile, 'utf8')).frameTimes
+  : [];
+function nearestFrame(t: number): FrameTime {
+  let best = frameTimes[0];
+  let bestDelta = Math.abs(best.t - t);
+  for (const ft of frameTimes) {
+    const d = Math.abs(ft.t - t);
+    if (d < bestDelta) { best = ft; bestDelta = d; }
+  }
+  return best;
+}
+function pngPathForIdx(idx: number): string {
+  return join(framesDir, String(idx).padStart(6, '0') + '.png');
 }
 
 // Load scroll times (may be empty for sit-mode runs).
@@ -120,8 +143,22 @@ for (let i = 0; i < probes.length; i++) {
   const prev = join(frameDir, 'prev.png');
   const curr = join(frameDir, 'curr.png');
 
-  ff(['-ss', String(tPrev), '-i', video, '-frames:v', '1', prev]);
-  ff(['-ss', String(t), '-i', video, '-frames:v', '1', curr]);
+  if (useFrames) {
+    // Lossless path: pick the captured PNG for `curr` and its indexed predecessor
+    // for `prev`. Indexed predecessor is correct because that's exactly what
+    // analyze.mts diffed. Time-delta lookup would wrongly return the same frame
+    // when capture cadence is slower than prevOffset.
+    const currFt = nearestFrame(t);
+    // For baseline_first_vs_last, we want the predecessor to be at `firstSettled`
+    // (not idx-1), so honor a large prevOffset by using nearestFrame on tPrev.
+    const prevFt = prevOffset > 0.3 ? nearestFrame(tPrev) : frameTimes[Math.max(0, currFt.idx - 1)];
+    copyFileSync(pngPathForIdx(prevFt.idx), prev);
+    copyFileSync(pngPathForIdx(currFt.idx), curr);
+  } else {
+    // WebM path: seek via ffmpeg. Lossy by encoder, but fine for large motion.
+    ff(['-ss', String(tPrev), '-i', video, '-frames:v', '1', prev]);
+    ff(['-ss', String(t), '-i', video, '-frames:v', '1', curr]);
+  }
 
   // Luma diff (grayscale), contrast-amplified ×8 so subtle changes are visible.
   const diffLuma = join(frameDir, 'diff_luma.png');
