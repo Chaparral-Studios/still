@@ -282,8 +282,10 @@
   // the extension. This avoids false negatives on real GIFs whose name
   // happens to contain one of these keywords (e.g., `clear-skies.gif`).
   //   matches: 1x1.gif, blank.gif, spacer.gif, transparent.gif,
-  //            1x1.trans.gif, blank-spacer.gif (via .spacer.), etc.
-  //   does NOT match: clear-skies.gif, blank-square.gif, 1x1-foo.gif
+  //            1x1.trans.gif, blank.spacer.gif (dot-separated infix), etc.
+  //   does NOT match: clear-skies.gif, blank-square.gif, blank-spacer.gif,
+  //                   1x1-foo.gif (hyphenated variants don't satisfy the
+  //                   dot-separator requirement in the optional group)
   const SPACER_URL_HINT_RE =
     /(?:^|\/)(?:1x1|blank|spacer|transparent|pixel|clear|empty)(?:\.(?:trans|spacer|blank|empty|clear))?\.(?:gif|png)(?:$|\?)/i;
 
