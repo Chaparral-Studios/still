@@ -1,6 +1,6 @@
 {
   "name": "still",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Freeze animated GIFs, WebP, and APNG images to their first frame",
   "scripts": {
     "test": "npx playwright test",
