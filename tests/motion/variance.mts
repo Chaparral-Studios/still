@@ -28,15 +28,31 @@ if (!inArg) { console.error('--in required'); process.exit(1); }
 const dir = resolve(inArg);
 const framesDir = join(dir, 'frames');
 const frameTimesFile = join(dir, 'frame_times.json');
+// Optional time window — for excluding the scrolling portion of a
+// scroll-then-sit recording so variance reflects only the post-settle period.
+const startT = parseFloat(arg('start-time', '0'));
+const endT = parseFloat(arg('end-time', '1e9'));
 if (!existsSync(framesDir) || !existsSync(frameTimesFile)) {
   console.error('need frames/ and frame_times.json in', dir); process.exit(1);
 }
 
-const frameFiles = readdirSync(framesDir)
+const frameTimesAll: { idx: number; t: number }[] =
+  JSON.parse(readFileSync(frameTimesFile, 'utf8')).frameTimes;
+const frameIdxInWindow = new Set(
+  frameTimesAll.filter((ft) => ft.t >= startT && ft.t <= endT).map((ft) => ft.idx)
+);
+const allFiles = readdirSync(framesDir)
   .filter((f) => /\.(jpe?g|png)$/i.test(f))
   .sort();
+const frameFiles = allFiles.filter((f) => {
+  const idx = parseInt(f.slice(0, 6), 10);
+  return frameIdxInWindow.size === 0 || frameIdxInWindow.has(idx);
+});
 if (frameFiles.length < 2) {
   console.error('need at least 2 frames; have', frameFiles.length); process.exit(1);
+}
+if (startT > 0 || endT < 1e9) {
+  console.log(`  window: t=${startT}s–${endT === 1e9 ? 'end' : endT + 's'} → ${frameFiles.length}/${allFiles.length} frames`);
 }
 
 console.log(`analyzing ${frameFiles.length} frames from ${framesDir}`);
@@ -100,9 +116,10 @@ for (let p = 0; p < pixelCount; p++) {
   if (sL > 2) highVarCount++;
 }
 
+const suffix = (startT > 0 || endT < 1e9) ? `_t${startT}-${endT}` : '';
 await sharp(Buffer.from(lumaStd.buffer), { raw: { width, height, channels: 1 } })
   .png()
-  .toFile(join(dir, 'variance_heatmap.png'));
+  .toFile(join(dir, `variance_heatmap${suffix}.png`));
 
 // Three-channel side-by-side image (R | G | B amplified std-dev).
 const rgbStack = Buffer.alloc(pixelCount * 3 * 3);
@@ -123,9 +140,10 @@ for (let y = 0; y < height; y++) {
 }
 await sharp(rgbStack, { raw: { width: width * 3, height, channels: 3 } })
   .png()
-  .toFile(join(dir, 'variance_rgb.png'));
+  .toFile(join(dir, `variance_rgb${suffix}.png`));
 
 const result = {
+  window: { startT, endT: endT === 1e9 ? null : endT },
   frames: n,
   meanLumaStd: +(sumLuma / pixelCount).toFixed(4),
   maxLumaStd: +maxLuma.toFixed(4),
@@ -133,5 +151,5 @@ const result = {
   highVariancePct: +(100 * highVarCount / pixelCount).toFixed(3),
   amplification: AMP,
 };
-writeFileSync(join(dir, 'variance.json'), JSON.stringify(result, null, 2));
+writeFileSync(join(dir, `variance${suffix}.json`), JSON.stringify(result, null, 2));
 console.log('\n' + JSON.stringify(result, null, 2));

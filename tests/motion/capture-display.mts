@@ -51,6 +51,11 @@ const extArg = arg('ext');
 const extDir = extArg ? resolve(extArg) : null;
 const windowW = parseInt(arg('window-w', '1280'), 10);
 const windowH = parseInt(arg('window-h', '800'), 10);
+// Scroll-then-sit: scroll through 4 viewport positions with short pauses, then
+// sit for the remainder of the capture window. Captures in-view / lazy-load
+// animations that pure sit-mode misses. Scroll timestamps are recorded so the
+// analyzer can mask them.
+const scrollThenSit = process.argv.includes('--scroll-then-sit');
 
 mkdirSync(outDir, { recursive: true });
 const framesDir = join(outDir, 'frames');
@@ -99,15 +104,26 @@ writeFileSync(join(outDir, 'debug.json'), JSON.stringify({
 }, null, 2));
 
 // Start ffmpeg capturing the target avfoundation display. "INDEX:none" = video
-// from that display, no audio. We write JPG quality-2 (visually lossless) at
-// the requested framerate for `seconds` seconds, then stop.
+// from that display, no audio. A few macOS-specific details:
+//   - Virtual displays report a retina (2×) backing buffer, so a 2560×1440
+//     display comes out as 5120×2880 from avfoundation. We crop to Chrome's
+//     1280×800 point window (= 2560×1600 pixels at 2× scale) at the top-left
+//     of the display (Chrome was launched there), then scale to 1280×800 for
+//     storage + compat with our other analyzers.
+//   - Without -r on output, ffmpeg defaults to 1000fps VFR output and fills
+//     with tens of thousands of duplicate frames. -r <fps> forces CFR.
+//   - -pixel_format uyvy422 matches what avfoundation offers for screen caps.
+const cropPx = `${windowW * 2}:${windowH * 2}:0:0`; // 2× for retina backing
 const ffArgs = [
   '-hide_banner',
   '-f', 'avfoundation',
   '-framerate', String(fps),
+  '-pixel_format', 'uyvy422',
   '-capture_cursor', '0',
   '-i', `${avIndex}:none`,
   '-t', String(seconds),
+  '-vf', `crop=${cropPx},scale=${windowW}:${windowH}`,
+  '-r', String(fps),
   '-q:v', '2',
   '-f', 'image2',
   join(framesDir, '%06d.jpg'),
@@ -115,8 +131,29 @@ const ffArgs = [
 console.log('ffmpeg', ffArgs.join(' '));
 const tFfStart = Date.now();
 const ff = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'inherit', 'inherit'] });
-
 const done = new Promise<void>((res) => ff.on('exit', () => res()));
+
+// Concurrent workload: scroll pattern (if requested) while ffmpeg captures.
+// Scroll timestamps are in ffmpeg wall-clock (capture timeline) so the analyzer
+// masks them correctly. ffmpeg may take a few hundred ms to start producing
+// frames — our scroll timestamps will be slightly ahead of true frame-time,
+// but the ±0.4s mask window absorbs that.
+const scrollTimes: number[] = [];
+if (scrollThenSit) {
+  (async () => {
+    // Let ffmpeg settle briefly before first scroll.
+    await page.waitForTimeout(500);
+    const positions = [600, 1200, 1800, 2400];
+    for (const y of positions) {
+      const t = (Date.now() - tFfStart) / 1000;
+      scrollTimes.push(t);
+      try { await page.evaluate((yy) => window.scrollTo({ top: yy, behavior: 'instant' }), y); } catch {}
+      await page.waitForTimeout(1000);
+    }
+    // Remaining time of the capture window: just sit.
+  })().catch((e) => console.error('scroll workload error:', (e as Error).message));
+}
+
 await done;
 const tFfEnd = Date.now();
 const dt = (tFfEnd - tFfStart) / 1000;
@@ -129,5 +166,5 @@ await context.close();
 const frameFiles = readdirSync(framesDir).filter((f) => f.endsWith('.jpg')).sort();
 const frameTimes = frameFiles.map((_f, idx) => ({ idx, t: idx / fps }));
 writeFileSync(join(outDir, 'frame_times.json'), JSON.stringify({ frameTimes }, null, 2));
-writeFileSync(join(outDir, 'scroll_times.json'), JSON.stringify({ scrollTimes: [] }, null, 2));
+writeFileSync(join(outDir, 'scroll_times.json'), JSON.stringify({ scrollTimes }, null, 2));
 console.log(`captured ${frameFiles.length} frames in ${dt.toFixed(1)}s (~${(frameFiles.length / dt).toFixed(1)} fps)`);

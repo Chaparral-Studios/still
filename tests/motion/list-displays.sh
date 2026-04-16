@@ -6,22 +6,19 @@
 
 set -euo pipefail
 
-echo "=== macOS displays (from system_profiler) ==="
-system_profiler SPDisplaysDataType -json 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for gpu in data.get("SPDisplaysDataType", []):
-    for d in gpu.get("spdisplays_ndrvs", []):
-        name = d.get("_name", "(unknown)")
-        res = d.get("_spdisplays_resolution", d.get("spdisplays_pixels", "?"))
-        origin = d.get("spdisplays_display_origin", "?")
-        main = " [MAIN]" if d.get("spdisplays_main") == "spdisplays_yes" else ""
-        mirror = " [MIRROR]" if d.get("spdisplays_mirror") == "spdisplays_yes" else ""
-        virtual = " [VIRTUAL]" if "virtual" in name.lower() or "betterdisplay" in name.lower() else ""
-        print(f"  name: {name}{main}{mirror}{virtual}")
-        print(f"    resolution: {res}")
-        print(f"    origin: {origin}")
-' 2>/dev/null || echo "  (could not parse system_profiler output)"
+echo "=== macOS displays (NSScreen origin + size) ==="
+# system_profiler doesn't surface coordinate origins reliably; a Swift one-liner
+# against NSScreen does. Bash-style heredoc piped into `swift -` runs inline.
+swift - <<'SWIFT_EOF' 2>/dev/null
+import Cocoa
+for screen in NSScreen.screens {
+  let f = screen.frame
+  let name = screen.localizedName
+  print("  name: \(name)")
+  print("    origin: (\(Int(f.origin.x)), \(Int(f.origin.y)))")
+  print("    size: \(Int(f.size.width))x\(Int(f.size.height))")
+}
+SWIFT_EOF
 
 echo ""
 echo "=== ffmpeg AVFoundation devices ==="

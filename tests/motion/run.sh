@@ -21,6 +21,10 @@
 #   AV_INDEX=N WINDOW_X=X WINDOW_Y=Y \
 #     MODE=flicker-real ./run.sh <url>      # true 60fps via AVFoundation capture
 #                                           # of a BetterDisplay virtual display
+#   AV_INDEX=N WINDOW_X=X WINDOW_Y=Y \
+#     MODE=flicker-scroll ./run.sh <url>    # same, but scrolls through 4
+#                                           # positions first to surface lazy-
+#                                           # loaded / in-view animations
 #   REF=<git-ref> ./run.sh <url>            # compare against a specific ref
 #
 # SIT mode produces the purest "is this page animating?" signal — scrolling
@@ -98,13 +102,17 @@ case "$MODE" in
     run_variant "none"    --no-scroll --png-capture
     run_variant "current" --no-scroll --png-capture --ext "$REPO_ROOT/web-extension"
     ;;
-  flicker-real)
+  flicker-real|flicker-scroll)
     # True-compositor 60fps capture via AVFoundation, for a Chrome window
     # running on a BetterDisplay virtual display (no photons anywhere).
     # Requires env vars: AV_INDEX, WINDOW_X, WINDOW_Y (see list-displays.sh).
+    # flicker-scroll adds a 4-step scroll-then-sit workload concurrent with
+    # the capture — catches in-view / lazy-loaded animations.
     : "${AV_INDEX:?AV_INDEX required}"
     : "${WINDOW_X:?WINDOW_X required}"
     : "${WINDOW_Y:?WINDOW_Y required}"
+    scroll_flag=""
+    [ "$MODE" = "flicker-scroll" ] && scroll_flag="--scroll-then-sit"
     for name in none current; do
       ext_args=""
       [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"
@@ -114,6 +122,7 @@ case "$MODE" in
       npx tsx "$SCRIPT_DIR/capture-display.mts" \
         --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" \
         --av-index "$AV_INDEX" --window-x "$WINDOW_X" --window-y "$WINDOW_Y" \
+        $scroll_flag \
         ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} $ext_args
       echo ">> variance: $name"
       npx tsx "$SCRIPT_DIR/variance.mts" --in "$vdir"
