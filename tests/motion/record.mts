@@ -59,11 +59,16 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 
 if (cookiesFile && existsSync(cookiesFile)) {
   const cookies: Cookie[] = JSON.parse(readFileSync(cookiesFile, 'utf8'));
-  for (const c of cookies) if (c.sameSite === 'None' && !c.secure) c.sameSite = 'Lax';
   let ok = 0, bad = 0;
   for (const c of cookies) {
+    const originalSameSite = c.sameSite;
+    // Playwright rejects sameSite=None without secure=true; silently downgrade.
+    if (c.sameSite === 'None' && !c.secure) c.sameSite = 'Lax';
     try { await context.addCookies([c]); ok++; }
-    catch (e) { bad++; console.log('reject', c.name, c.domain, (e as Error).message.slice(0, 80)); }
+    catch (e) {
+      bad++;
+      console.log('reject', c.name, c.domain, `sameSite=${originalSameSite}`, (e as Error).message.slice(0, 80));
+    }
   }
   console.log(`loaded ${ok} cookies, rejected ${bad}`);
 }

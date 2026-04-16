@@ -30,7 +30,7 @@ execFileSync('ffmpeg', [
   '-y', '-i', video,
   '-vf', `fps=10,tblend=all_mode=difference,signalstats,metadata=print:file=${metaLog}`,
   '-f', 'null', '-',
-], { stdio: ['ignore', 'ignore', 'ignore'] });
+], { stdio: ['ignore', 'ignore', 'inherit'] });
 
 // Parse metadata log: lines like "lavfi.signalstats.YAVG=1.234"
 const log = readFileSync(metaLog, 'utf8');
@@ -54,7 +54,7 @@ execFileSync('ffmpeg', [
   '-y', '-i', video,
   '-vf', 'fps=10,tblend=all_mode=difference,format=gray,lagfun=decay=1.0,eq=contrast=4',
   '-update', '1', '-frames:v', '99999', heatmap,
-], { stdio: ['ignore', 'ignore', 'ignore'] });
+], { stdio: ['ignore', 'ignore', 'inherit'] });
 
 // Mask scroll moments (±0.4s around each scroll) so viewport motion doesn't count.
 const scrollFile = join(dir, 'scroll_times.json');

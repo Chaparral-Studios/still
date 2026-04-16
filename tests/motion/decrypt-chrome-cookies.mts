@@ -62,16 +62,6 @@ function decrypt(buf: Buffer): string | DecryptError {
   }
 }
 
-// Query cookies for the domain (and its subdomains via leading-dot match).
-const rowsJson = execFileSync('sqlite3', [
-  cookiesCopy,
-  '-json',
-  `SELECT host_key, name, path, expires_utc, is_secure, is_httponly, samesite,
-          hex(encrypted_value) AS enc_hex, value AS plain
-   FROM cookies
-   WHERE host_key LIKE '%${domain}%';`,
-], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
-
 type ChromeCookieRow = {
   host_key: string;
   name: string;
@@ -83,7 +73,20 @@ type ChromeCookieRow = {
   enc_hex: string;
   plain: string;
 };
-const rows: ChromeCookieRow[] = rowsJson.trim() ? JSON.parse(rowsJson) : [];
+
+// Select every row, then filter host_key in JS. Avoids any possibility of
+// `domain` (from argv) changing the SQL shape — not a real security boundary
+// here, but keeps the query static and the intent obvious.
+const rowsJson = execFileSync('sqlite3', [
+  cookiesCopy,
+  '-json',
+  `SELECT host_key, name, path, expires_utc, is_secure, is_httponly, samesite,
+          hex(encrypted_value) AS enc_hex, value AS plain
+   FROM cookies;`,
+], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+
+const allRows: ChromeCookieRow[] = rowsJson.trim() ? JSON.parse(rowsJson) : [];
+const rows = allRows.filter((r) => r.host_key.includes(domain));
 
 const cookies: Cookie[] = [];
 const skipped: { name: string; reason: DecryptError }[] = [];
