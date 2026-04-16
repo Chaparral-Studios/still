@@ -30,8 +30,19 @@
   const style = document.createElement('style');
   style.id = '__still-hide';
   style.textContent = [
-    // Kill all CSS transitions — prevents smooth crossfades, carousel glides, etc.
-    '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Kill CSS transitions AND animations at the CSS level so they can never
+    // produce visible motion — even during the brief window before our JS
+    // cancelAnimations() runs. animation-duration: 0s makes the animation
+    // "run" in zero time, so it's rendered at its end state on the first
+    // paint. animation-fill-mode: forwards ensures the end state persists
+    // (without it, the 0s animation completes and reverts to the pre-anim
+    // style — which is how we got the fade-in-reveal blank-page bug).
+    '*, *::before, *::after {',
+    '  transition-duration: 0s !important;',
+    '  animation-duration: 0s !important;',
+    '  animation-delay: 0s !important;',
+    '  animation-fill-mode: forwards !important;',
+    '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
     'img[src$=".gif"], img[src*=".gif?"],',
     'img[src$=".webp"], img[src*=".webp?"],',
@@ -260,10 +271,26 @@
   // Check both natural size and declared HTML/CSS size, because
   // declarativeNetRequest may redirect a 1x1.gif to frozen.svg,
   // changing naturalWidth to the SVG's dimensions.
+  // Filename patterns that are almost certainly spacers / tracking pixels.
+  // Tight match: the spacer keyword must be the exact filename basename (no
+  // `-suffix` variants), optionally followed by `.trans`/`.blank`/etc. before
+  // the extension. This avoids false negatives on real GIFs whose name
+  // happens to contain one of these keywords (e.g., `clear-skies.gif`).
+  //   matches: 1x1.gif, blank.gif, spacer.gif, transparent.gif,
+  //            1x1.trans.gif, blank-spacer.gif (via .spacer.), etc.
+  //   does NOT match: clear-skies.gif, blank-square.gif, 1x1-foo.gif
+  const SPACER_URL_HINT_RE =
+    /(?:^|\/)(?:1x1|blank|spacer|transparent|pixel|clear|empty)(?:\.(?:trans|spacer|blank|empty|clear))?\.(?:gif|png)(?:$|\?)/i;
+
   function isSpacer(img) {
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
+    // Only trust natural dimensions when the current src has actually
+    // finished loading. `img.complete` is false after `src` is reassigned
+    // and before the new resource has loaded; trusting nw/nh then would
+    // let a real animated GIF leak through after a lazy-load swap from a
+    // 1×1 placeholder (whose nw/nh briefly remain as 1×1).
+    if (img.complete && nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
     // Check HTML attributes (width="1" height="1")
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
@@ -271,6 +298,10 @@
     // Check if the element is invisible (zero layout size) — but only if
     // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
     if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
+    // Filename hints — classic spacer names (1x1.trans.gif, blank.gif, etc.).
+    // Narrow match: spacer keyword must be the filename basename, not a prefix.
+    const src = img.currentSrc || img.src || '';
+    if (SPACER_URL_HINT_RE.test(src)) return true;
     return false;
   }
 
@@ -306,10 +337,41 @@
 
     // --- Path A: .gif or data:image/gif — replace immediately (always animated) ---
     if (isDefinitelyAnimated(src)) {
-      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them
+      // Skip tiny spacer/tracking pixels — mark static so CSS unhides them.
+      // isSpacer is reliable once the image has loaded (naturalWidth>0); a
+      // URL-filename match is also reliable without waiting.
       if (isSpacer(img)) { img.dataset.still = 'static'; return; }
       // For data: GIF URIs, check if actually animated (skip single-frame GIFs)
       if (DATA_GIF_RE.test(src) && !isAnimatedDataGif(src)) { img.dataset.still = 'static'; return; }
+      // Not yet loaded and no URL hint — could still be a 1×1 spacer we can't
+      // tell about yet. Hide until we know (defer via load event). Without
+      // this, a race between page parse and our scan would have us either
+      // (a) falsely replace a lazy-load placeholder (blocks the page's src
+      // swap), or (b) flash the placeholder-as-pause-icon. The probing
+      // state + visibility:hidden mirrors what we do for extensionless URLs.
+      if (!img.complete || (img.naturalWidth === 0 && img.naturalHeight === 0)) {
+        img.dataset.still = 'probing';
+        img.style.visibility = 'hidden';
+        const settle = () => {
+          if (isSpacer(img)) {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          } else {
+            img.dataset.still = 'replacing';
+            replaceWithPlaceholder(img);
+          }
+        };
+        img.addEventListener('load', settle, { once: true });
+        // If the image fails to load (broken URL), unhide rather than leave
+        // the viewport empty. It'll be re-checked if src changes.
+        img.addEventListener('error', () => {
+          if (img.dataset.still === 'probing') {
+            img.dataset.still = 'static';
+            img.style.visibility = '';
+          }
+        }, { once: true });
+        return;
+      }
       img.dataset.still = 'replacing';
       replaceWithPlaceholder(img);
       return;
@@ -455,7 +517,11 @@
             }
             continue;
           }
-          if (target.tagName === 'IMG' && target.dataset.still !== 'probing' && target.dataset.still !== 'static') {
+          // Re-process on src change unless the image is mid-probe (await'ing
+          // load event). In particular, `static` images MUST be re-processed:
+          // a lazy-load swap from a 1×1 spacer (marked static) to a real
+          // animated GIF would otherwise leak through unblocked.
+          if (target.tagName === 'IMG' && target.dataset.still !== 'probing') {
             target.dataset.still = '';
             processImage(target);
           }
@@ -483,9 +549,38 @@
   // --- CSS animation cancellation ---
 
   function cancelAnimations() {
+    // `Animation.cancel()` reverts the element to its PRE-animation style. For
+    // one-shot reveal animations (common WordPress pattern: `body { opacity: 0;
+    // animation: fadein 0.3s forwards; }`), that base style is invisible —
+    // cancelling leaves the whole page stuck at opacity:0. `finish()` jumps to
+    // the animation's end state instead, which respects `fill-mode: forwards`
+    // and leaves a fade-in at its final opacity:1.
+    //
+    // Rules:
+    //   - Infinite-iteration animations: cancel() — no meaningful end state,
+    //     and these are the ones we actually want to stop (spinners, loops).
+    //   - Finite with fill 'forwards' / 'both': finish() — respects author
+    //     intent that the end state persists.
+    //   - Everything else: cancel() — default revert is fine when the natural
+    //     state is post-animation anyway.
     try {
       for (const a of document.getAnimations({ subtree: true })) {
-        a.cancel();
+        try {
+          const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+            ? a.effect.getComputedTiming()
+            : null;
+          const iterations = timing && timing.iterations;
+          const fill = timing && timing.fill;
+          if (iterations === Infinity) {
+            a.cancel();
+          } else if (fill === 'forwards' || fill === 'both') {
+            a.finish();
+          } else {
+            a.cancel();
+          }
+        } catch (e) {
+          try { a.cancel(); } catch (e2) {}
+        }
       }
     } catch (e) {}
   }
