@@ -8,7 +8,28 @@
 #   ./run.sh <url> [seconds]                # compare HEAD vs main
 #   MODE=single ./run.sh <url>              # just current tree
 #   MODE=baseline ./run.sh <url>            # add a "no extension" run
+#   MODE=sit ./run.sh <url> [seconds]       # no scrolling: isolates ambient motion
+#   MODE=sit-sweep ./run.sh <url>           # sit at 5/15/60s: catches slow cycles
+#   MODE=scroll-sit ./run.sh <url> [sec]    # scroll through 4 positions, then sit:
+#                                           # catches in-view/lazy-load animations
+#   MODE=sit-png ./run.sh <url> [sec]       # lossless PNG capture, sit mode:
+#                                           # catches sub-encoder-floor signal
+#                                           # (subpixel AA jitter, slow hue drift)
+#   MODE=flicker ./run.sh <url> [sec]       # CDP screencast + variance. Capped
+#                                           # at ~3fps in headless — slow-cycle
+#                                           # analysis only, not true flicker.
+#   AV_INDEX=N WINDOW_X=X WINDOW_Y=Y \
+#     MODE=flicker-real ./run.sh <url>      # true 60fps via AVFoundation capture
+#                                           # of a BetterDisplay virtual display
+#   AV_INDEX=N WINDOW_X=X WINDOW_Y=Y \
+#     MODE=flicker-scroll ./run.sh <url>    # same, but scrolls through 4
+#                                           # positions first to surface lazy-
+#                                           # loaded / in-view animations
 #   REF=<git-ref> ./run.sh <url>            # compare against a specific ref
+#
+# SIT mode produces the purest "is this page animating?" signal — scrolling
+# otherwise dominates the score. Try different seconds values to catch
+# animations on different timescales (5s for fast loops, 30s for slow crossfades).
 #
 # Site cookies (for bypassing bot walls / auth): place a Playwright cookie
 # JSON at tests/motion/cookies/<hostname>.json — it will be auto-loaded when
@@ -59,6 +80,71 @@ case "$MODE" in
   baseline)
     run_variant "none"
     run_variant "current" --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit)
+    run_variant "none" --no-scroll
+    run_variant "current" --no-scroll --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit-sweep)
+    # Sit at three durations. Short (5s) catches fast loops; medium (15s) catches
+    # mid-cycle animations; long (60s) catches slow breathing/tint cycles.
+    for dur in 5 15 60; do
+      SECONDS_RUN="$dur"
+      run_variant "none_${dur}s"    --no-scroll
+      run_variant "current_${dur}s" --no-scroll --ext "$REPO_ROOT/web-extension"
+    done
+    ;;
+  scroll-sit)
+    run_variant "none"    --scroll-then-sit
+    run_variant "current" --scroll-then-sit --ext "$REPO_ROOT/web-extension"
+    ;;
+  sit-png)
+    run_variant "none"    --no-scroll --png-capture
+    run_variant "current" --no-scroll --png-capture --ext "$REPO_ROOT/web-extension"
+    ;;
+  flicker-real|flicker-scroll)
+    # True-compositor 60fps capture via AVFoundation, for a Chrome window
+    # running on a BetterDisplay virtual display (no photons anywhere).
+    # Requires env vars: AV_INDEX, WINDOW_X, WINDOW_Y (see list-displays.sh).
+    # flicker-scroll adds a 4-step scroll-then-sit workload concurrent with
+    # the capture — catches in-view / lazy-loaded animations.
+    : "${AV_INDEX:?AV_INDEX required}"
+    : "${WINDOW_X:?WINDOW_X required}"
+    : "${WINDOW_Y:?WINDOW_Y required}"
+    scroll_flag=""
+    [ "$MODE" = "flicker-scroll" ] && scroll_flag="--scroll-then-sit"
+    for name in none current; do
+      ext_args=""
+      [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"
+      vdir="$RUN_DIR/$name"
+      mkdir -p "$vdir"
+      echo ">> capture: $name"
+      npx tsx "$SCRIPT_DIR/capture-display.mts" \
+        --url "$URL" --out "$vdir" --seconds "$SECONDS_RUN" \
+        --av-index "$AV_INDEX" --window-x "$WINDOW_X" --window-y "$WINDOW_Y" \
+        $scroll_flag \
+        ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} $ext_args
+      echo ">> variance: $name"
+      npx tsx "$SCRIPT_DIR/variance.mts" --in "$vdir"
+      npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
+    done
+    ;;
+  flicker)
+    # Fast path: headless CDP screencast + variance. Limited to ~3fps in headless;
+    # use flicker-real for the migraine-frequency detection.
+    for name in none current; do
+      ext_args=""
+      [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"
+      vdir="$RUN_DIR/$name"
+      mkdir -p "$vdir"
+      echo ">> screencast: $name"
+      npx tsx "$SCRIPT_DIR/screencast.mts" --url "$URL" --out "$vdir" \
+        --seconds "$SECONDS_RUN" ${COOKIES_ARGS[@]+"${COOKIES_ARGS[@]}"} $ext_args
+      echo ">> variance: $name"
+      npx tsx "$SCRIPT_DIR/variance.mts" --in "$vdir"
+      # Also produce the ordinary motion.csv + heatmap for comparison.
+      npx tsx "$SCRIPT_DIR/analyze.mts" --in "$vdir"
+    done
     ;;
   compare|*)
     # Ensure ref worktree exists at $REF.
