@@ -56,6 +56,11 @@ const windowH = parseInt(arg('window-h', '800'), 10);
 // animations that pure sit-mode misses. Scroll timestamps are recorded so the
 // analyzer can mask them.
 const scrollThenSit = process.argv.includes('--scroll-then-sit');
+// Use the system Chrome binary (not Playwright's Chromium-for-Testing). Real
+// Chrome has a different TLS fingerprint that Cloudflare-protected sites like
+// axios.com require even with valid cookies. Channel 'chrome' is set up by
+// `npx playwright install chrome`.
+const useSystemChrome = process.argv.includes('--system-chrome');
 
 mkdirSync(outDir, { recursive: true });
 const framesDir = join(outDir, 'frames');
@@ -70,11 +75,15 @@ const launchArgs = [
   '--mute-audio',
   // We rely on the OS to keep the compositor running at full rate since the
   // window is on a "real" (virtual) display, not headless.
+  // Disable Chrome's `navigator.webdriver` exposure + automation banner so
+  // Cloudflare-style bot walls accept the session even with valid cookies.
+  '--disable-blink-features=AutomationControlled',
 ];
 if (extDir) launchArgs.push(`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`);
 
 const context = await chromium.launchPersistentContext(join(outDir, '.userdata'), {
   headless: false,
+  channel: useSystemChrome ? 'chrome' : undefined,
   args: launchArgs,
   viewport: { width: windowW, height: windowH },
 });

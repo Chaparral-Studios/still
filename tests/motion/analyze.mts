@@ -68,7 +68,10 @@ let curFrame: number | null = null;
 for (const line of log.split('\n')) {
   const pts = line.match(/pts_time:([\d.]+)/);
   if (pts) curFrame = parseFloat(pts[1]);
-  const m = line.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
+  // Accept scientific notation — on near-identical frames ffmpeg emits values
+  // like `7.71484e-05`, and a [\d.]-only capture silently truncated the exponent
+  // and read that as 7.71484 (a huge value from a numerically-zero diff).
+  const m = line.match(/lavfi\.signalstats\.YAVG=([-+eE\d.]+)/);
   if (m && curFrame != null) scores.push({ t: curFrame, y: parseFloat(m[1]) });
 }
 if (useFrames) {

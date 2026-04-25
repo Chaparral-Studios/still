@@ -9,7 +9,11 @@
 // region where the heatmap showed motion).
 //
 // Usage: tsx probe.mts --url <url> --out <dir> [--seconds <n>] [--cookies <json>]
-//                      [--region x,y,w,h]
+//                      [--region x,y,w,h] [--include-load]
+//
+// --include-load: do NOT reset the mutation clock after hydration. Use this to
+// catch one-shot on-load flourishes (the reset is meant to isolate steady-state
+// motion from initial hydration churn, but that hides page-load animations).
 
 import { chromium as rawChromium, type Cookie, type Response } from '@playwright/test';
 import { addExtra } from 'playwright-extra';
@@ -34,6 +38,7 @@ const outDir = resolve(outArg);
 const seconds = parseInt(arg('seconds', '15'), 10);
 const cookiesFile = arg('cookies');
 const regionArg = arg('region');
+const includeLoad = process.argv.includes('--include-load');
 type Rect = { x: number; y: number; w: number; h: number };
 const region: Rect | null = regionArg
   ? (() => { const [x, y, w, h] = regionArg.split(',').map(Number); return { x, y, w, h }; })()
@@ -117,12 +122,55 @@ try {
 } catch {}
 
 // Reset the probe clock: we only want to measure mutations that happen in the
-// steady-state window, not initial hydration.
-await page.evaluate(() => {
-  const w = window as unknown as { __probe: { mutations: unknown[]; start: number } };
-  w.__probe.mutations = [];
-  w.__probe.start = Date.now();
-});
+// steady-state window, not initial hydration. Skipped when --include-load so
+// we can catch one-shot on-load flourishes that finish during hydration.
+if (!includeLoad) {
+  await page.evaluate(() => {
+    const w = window as unknown as { __probe: { mutations: unknown[]; start: number } };
+    w.__probe.mutations = [];
+    w.__probe.start = Date.now();
+  });
+}
+
+// Snapshot active animations as early as we can — on-load WAAPI/CSS animations
+// may finish before the main wait elapses. Captured in parallel with the main
+// observation window below.
+type EarlyAnim = {
+  target: string | null;
+  targetOuterHTML: string | null;
+  animationName: string | null;
+  playState: string;
+  currentTime: number | null;
+  duration: number | null;
+  delay: number | null;
+  iterations: number | null;
+  easing: string | null;
+  keyframes: Record<string, unknown>[];
+};
+const earlyAnimations: EarlyAnim[] = await page.evaluate(() =>
+  Array.from((document as Document & { getAnimations(o?: { subtree: boolean }): Animation[] }).getAnimations({ subtree: true })).map((a) => {
+    const effect = a.effect as KeyframeEffect | null;
+    const target = effect?.target as Element | null;
+    const timing = effect?.getComputedTiming?.();
+    const kfs = effect?.getKeyframes?.() ?? [];
+    const outer = target ? (target.outerHTML || '').slice(0, 200) : null;
+    return {
+      target: target ? (target.tagName.toLowerCase() +
+        (target.id ? '#' + target.id : '') +
+        (typeof target.className === 'string' && target.className
+          ? '.' + target.className.trim().split(/\s+/).slice(0, 3).join('.') : '')) : null,
+      targetOuterHTML: outer,
+      animationName: (a as Animation & { animationName?: string }).animationName || a.id || null,
+      playState: a.playState,
+      currentTime: typeof a.currentTime === 'number' ? a.currentTime : null,
+      duration: typeof timing?.duration === 'number' ? timing.duration : null,
+      delay: typeof timing?.delay === 'number' ? timing.delay : null,
+      iterations: typeof timing?.iterations === 'number' ? timing.iterations : null,
+      easing: (timing as { easing?: string })?.easing || null,
+      keyframes: kfs as unknown as Record<string, unknown>[],
+    };
+  })
+);
 
 await page.waitForTimeout(seconds * 1000);
 
@@ -193,8 +241,9 @@ for (const m of filtered) {
 const sorted = Array.from(agg.values()).sort((a, b) => b.count - a.count);
 
 writeFileSync(join(outDir, 'probe.json'), JSON.stringify({
-  url, seconds, region, totalMutations: mutations.length, filteredMutations: filtered.length,
-  animations, topSelectors: sorted.slice(0, 30),
+  url, seconds, region, includeLoad,
+  totalMutations: mutations.length, filteredMutations: filtered.length,
+  earlyAnimations, animations, topSelectors: sorted.slice(0, 30),
 }, null, 2));
 
 // Summary markdown.
@@ -216,8 +265,19 @@ for (const a of sorted.slice(0, 15)) {
   md.push(`| \`${a.selector}\` | ${a.count} | ${types} | ${attrs} | ${rect} | ${a.firstT.toFixed(1)}→${a.lastT.toFixed(1)} |`);
 }
 md.push('');
+if (earlyAnimations.length) {
+  md.push('## WAAPI / CSS animations at load (captured right after body-text ready)');
+  md.push('');
+  md.push('| target | playState | t/dur (ms) | keyframes |');
+  md.push('|--------|-----------|-----------:|----------:|');
+  for (const a of earlyAnimations.slice(0, 20)) {
+    const td = `${a.currentTime?.toFixed(0) ?? '?'}/${a.duration?.toFixed(0) ?? '?'}`;
+    md.push(`| \`${a.target || '(anon)'}\` | ${a.playState} | ${td} | ${a.keyframes} |`);
+  }
+  md.push('');
+}
 if (animations.length) {
-  md.push('## Active WAAPI / CSS animations');
+  md.push('## Active WAAPI / CSS animations (at end of observation window)');
   md.push('');
   md.push('| target | playState | keyframes |');
   md.push('|--------|-----------|----------:|');
