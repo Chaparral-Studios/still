@@ -243,17 +243,20 @@
   }
 
   // --- Detect animation for extensionless URLs ---
-  // Two-step: HEAD to get content-type, then partial fetch if needed
+  // Two-step: HEAD to get content-type, then partial fetch if needed.
+  // Returns 'animated', 'static', or 'unknown'. 'unknown' means HEAD failed
+  // or returned a content-type we can't classify (e.g., a Cloudflare
+  // interstitial returning text/html with status 403 before the page passes
+  // verification). Caller should defer the decision in that case.
 
   function detectAnimationForExtensionless(url) {
     return fetch(url, { method: 'HEAD', credentials: 'omit' })
       .then((res) => {
+        if (!res.ok) return 'unknown';
         const ct = (res.headers.get('content-type') || '').toLowerCase();
-        // GIF is always animated
-        if (ct.includes('image/gif')) return true;
-        // Static formats — definitely not animated
+        if (ct.includes('image/gif')) return 'animated';
         if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
-            ct.includes('image/bmp') || ct.includes('image/avif')) return false;
+            ct.includes('image/bmp') || ct.includes('image/avif')) return 'static';
         // WebP/APNG could be either — need to check the bytes
         if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) {
           return fetch(url, {
@@ -263,12 +266,13 @@
             .then((res2) => res2.arrayBuffer())
             .then((buf) => {
               const bytes = new Uint8Array(buf);
-              return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
-            });
+              return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes)) ? 'animated' : 'static';
+            })
+            .catch(() => 'unknown');
         }
-        return false;
+        return 'unknown';
       })
-      .catch(() => false);
+      .catch(() => 'unknown');
   }
 
   // --- Spacer detection ---
@@ -415,12 +419,34 @@
       img.dataset.still = 'probing';
       img.style.visibility = 'hidden';
 
-      detectAnimationForExtensionless(src).then((animated) => {
-        if (animated) {
+      const apply = (result) => {
+        if (result === 'animated') {
           replaceWithPlaceholder(img);
         } else {
+          // 'static' or final 'unknown' — fail open (show image). The retry
+          // path below already handled the recoverable-unknown case.
           img.dataset.still = 'static';
           img.style.visibility = '';
+        }
+      };
+
+      detectAnimationForExtensionless(src).then((result) => {
+        if (result !== 'unknown') {
+          apply(result);
+          return;
+        }
+        // HEAD failed at scan time. Common cause: the page navigated through
+        // Cloudflare's "Just a moment..." interstitial, our scan ran on the
+        // pre-verification document, and the resource was 403'd. Defer the
+        // decision until the image actually loads — by then the resource is
+        // definitely fetchable, and a fresh HEAD will return real headers.
+        const retry = () => detectAnimationForExtensionless(src).then(apply);
+        if (img.complete && img.naturalWidth > 0) {
+          // Image already loaded between HEAD failing and now — retry now.
+          retry();
+        } else {
+          img.addEventListener('load', retry, { once: true });
+          img.addEventListener('error', () => apply('static'), { once: true });
         }
       });
     }

@@ -36,6 +36,34 @@ function createHandler(corsOrigin) {
       return;
     }
 
+    // Simulates the Cloudflare-interstitial race seen on axios.com:
+    // the first HEAD request gets 403/text-html (page is mid-verification),
+    // subsequent HEADs and the GET return the real gif. The image GET is
+    // also delayed slightly so the content script has time to install its
+    // retry listener before the load event fires.
+    if (urlPath === '/cf-protected-image') {
+      if (req.method === 'HEAD') {
+        global.__cfHeadCount = (global.__cfHeadCount || 0) + 1;
+        if (global.__cfHeadCount === 1) {
+          res.writeHead(403, { 'Content-Type': 'text/html' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': '1024' });
+        res.end();
+        return;
+      }
+      // GET — return the real gif after a short delay so the listener gets
+      // attached first.
+      setTimeout(() => {
+        const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
+        const data = fs.readFileSync(gifPath);
+        res.writeHead(200, { 'Content-Type': 'image/gif' });
+        res.end(data);
+      }, 300);
+      return;
+    }
+
     try {
       const data = fs.readFileSync(filePath);
       res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
@@ -246,6 +274,35 @@ test.describe('Still — block and replace logic', () => {
     }, { timeout: 5000 });
 
     const src = await page.$eval('#img-extensionless', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('retries detection on image load when initial HEAD fails (Cloudflare-interstitial race)', async ({ page }) => {
+    // Reproduces the axios.com landing-page bug: extensionless image URL
+    // (Next.js /_next/image proxy) was wrongly marked `static` because the
+    // initial HEAD landed during Cloudflare's "Just a moment..." phase and
+    // came back 403/text-html. After the image then loaded successfully, no
+    // re-check fired and the GIF animated unblocked. The fix: treat HEAD
+    // failure/unknown as deferred, retry on `load`.
+    global.__cfHeadCount = 0;
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-cf';
+      img.src = base + '/cf-protected-image';
+      document.body.appendChild(img);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-cf');
+      return img && img.dataset.still === 'replaced';
+    }, { timeout: 8000 });
+
+    const src = await page.$eval('#img-cf', el => el.src);
     expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
