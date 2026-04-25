@@ -67,6 +67,30 @@
 
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
+  // --- Per-host CSS rule pack ---
+  // host-rules.json is a curated list of `!important` CSS overrides for sites
+  // where our general defenses don't catch all motion (e.g. JS-driven jQuery
+  // animations against elements with predictable class names — see
+  // president.mit.edu's `.curtain-bar`). Rules are pinned with `!important`
+  // so they beat any inline styles the page's animation library writes per
+  // frame — the animation still "runs", but each frame's value is overridden
+  // before paint, so nothing visibly moves. Async-loaded but applied before
+  // the kinds of animations we target typically fire (jQuery animate triggers
+  // on image-load events, hundreds of ms after document_start).
+  if (api.runtime && typeof api.runtime.getURL === 'function') {
+    fetch(api.runtime.getURL('host-rules.json'))
+      .then((r) => r.json())
+      .then((rules) => {
+        const list = rules[location.hostname];
+        if (!list || !list.length) return;
+        const sheet = document.createElement('style');
+        sheet.id = '__still-host-rules';
+        sheet.textContent = list.join('\n');
+        (document.head || document.documentElement).appendChild(sheet);
+      })
+      .catch(() => {});
+  }
+
   // --- Helpers: wrap callback APIs to handle both Promise (Safari) and callback (Chrome) ---
 
   function storageGet(keys) {

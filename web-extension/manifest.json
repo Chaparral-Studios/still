@@ -63,7 +63,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/frozen.svg"],
+      "resources": ["icons/frozen.svg", "host-rules.json"],
       "matches": ["<all_urls>"]
     }
   ]

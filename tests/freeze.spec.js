@@ -28,6 +28,17 @@ function createHandler(corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     }
 
+    // Host-rules JSON used by the per-host CSS rule pack test. Rule keys off
+    // the test server's hostname (127.0.0.1) and pins a known property so the
+    // test can verify the override actually beats inline style writes.
+    if (urlPath === '/host-rules.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        '127.0.0.1': ['.test-host-rule-target { left: 999px !important; }']
+      }));
+      return;
+    }
+
     if (urlPath === '/cdn-image') {
       const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
       const data = fs.readFileSync(gifPath);
@@ -90,8 +101,13 @@ test.afterAll(async () => {
   if (xOriginServer) xOriginServer.close();
 });
 
-async function injectContentScript(page) {
-  await page.addInitScript(() => {
+async function injectContentScript(page, opts = {}) {
+  // hostRulesURL: when set, the mocked browser.runtime.getURL() will resolve
+  // 'host-rules.json' to that URL (the test server's /host-rules.json route).
+  // Tests that don't care about host-rules can leave this unset; the loader's
+  // fetch will fail silently.
+  const hostRulesURL = opts.hostRulesURL || '';
+  await page.addInitScript((u) => {
     window.browser = {
       storage: {
         local: {
@@ -101,10 +117,11 @@ async function injectContentScript(page) {
       },
       runtime: {
         onMessage: { addListener() {} },
-        sendMessage() { return Promise.resolve(); }
+        sendMessage() { return Promise.resolve(); },
+        getURL(path) { return u + '/' + path; }
       }
     };
-  });
+  }, hostRulesURL);
 }
 
 const PLACEHOLDER_PREFIX = "data:image/svg+xml,";
@@ -275,6 +292,54 @@ test.describe('Still — block and replace logic', () => {
 
     const src = await page.$eval('#img-extensionless', el => el.src);
     expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('per-host CSS rule pack — applies matching rules and beats inline style', async ({ page }) => {
+    // Verifies the host-rules.json mechanism: content.js fetches the rule pack
+    // at init, finds rules keyed to location.hostname, and injects them as an
+    // !important stylesheet that overrides inline-style writes (the
+    // jQuery-animate / curtain-bar pattern from president.mit.edu).
+    await injectContentScript(page, { hostRulesURL: baseURL });
+    await page.goto(baseURL + '/test-page.html');
+
+    // Element with the targeted class + an inline style the rule should beat.
+    await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.id = 'host-rule-target';
+      el.className = 'test-host-rule-target';
+      el.style.position = 'absolute';
+      el.style.left = '0px';
+      document.body.appendChild(el);
+    });
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // The rule pins left: 999px !important; even though inline style says 0px,
+    // computed style should reflect the rule.
+    await page.waitForFunction(() => {
+      const el = document.getElementById('host-rule-target');
+      return el && getComputedStyle(el).left === '999px';
+    }, { timeout: 5000 });
+
+    // And confirm the host-rules style block actually exists in the DOM
+    const sheetText = await page.evaluate(() =>
+      (document.getElementById('__still-host-rules') || {}).textContent
+    );
+    expect(sheetText).toContain('.test-host-rule-target');
+  });
+
+  test('per-host CSS rule pack — bundled host-rules.json is well-formed and contains the MIT OP rule', async () => {
+    const rulesPath = path.resolve(__dirname, '..', 'web-extension', 'host-rules.json');
+    const rules = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
+    expect(typeof rules).toBe('object');
+    // toHaveProperty treats dots as nested paths — pass key as array for
+    // literal dots in the host name.
+    expect(rules).toHaveProperty(['president.mit.edu']);
+    expect(Array.isArray(rules['president.mit.edu'])).toBe(true);
+    // Must contain the curtain-bar fix that defuses the hero flourish.
+    const joined = rules['president.mit.edu'].join('\n');
+    expect(joined).toMatch(/\.curtain-bar/);
+    expect(joined).toMatch(/!important/);
   });
 
   test('retries detection on image load when initial HEAD fails (Cloudflare-interstitial race)', async ({ page }) => {
