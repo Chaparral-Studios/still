@@ -141,6 +141,12 @@
           img.style.visibility = '';
         });
       } else {
+        // Note: init() short-circuits via `initialized` after its first run,
+        // so flipping disabled→enabled on the same page won't re-inject
+        // `style`, the host-rules sheet, or re-scan for missed images. The
+        // popup's expected UX is "toggle requires reload to take effect" and
+        // this preserves that. If we ever want hot re-enable, init() and the
+        // host-rules injector would both need to be made idempotent.
         init();
       }
     });
@@ -505,9 +511,14 @@
         // decision until the image actually loads — by then the resource is
         // definitely fetchable, and a fresh HEAD will return real headers.
         const retry = () => detectAnimationForExtensionless(src).then(apply);
-        if (img.complete && img.naturalWidth > 0) {
-          // Image already loaded between HEAD failing and now — retry now.
-          retry();
+        if (img.complete) {
+          // Image is already done loading. Either it succeeded
+          // (naturalWidth > 0 → retry the HEAD now that the resource is
+          // definitely live) or it errored (naturalWidth === 0 → no
+          // future load/error event will fire, so settle as static now;
+          // otherwise the image would stay visibility:hidden forever).
+          if (img.naturalWidth > 0) retry();
+          else apply('static');
         } else {
           img.addEventListener('load', retry, { once: true });
           img.addEventListener('error', () => apply('static'), { once: true });

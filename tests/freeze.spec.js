@@ -49,6 +49,14 @@ function createHandler(corsOrigin) {
       return;
     }
 
+    // Always 404 — used to construct an already-errored image whose
+    // load/error events have already fired before content.js scans it.
+    if (urlPath === '/broken-image') {
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end('not found');
+      return;
+    }
+
     if (urlPath === '/cdn-image') {
       const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
       const data = fs.readFileSync(gifPath);
@@ -136,15 +144,25 @@ async function injectContentScript(page, opts = {}) {
   const headProbeContentType = opts.headProbeContentType || '';
   const initialState = opts.initialState || { enabled: true, allowlist: [] };
   await page.addInitScript(({ u, hpct, state }) => {
+    // Mutable state lives on a window-level slot so tests can flip it via
+    // page.evaluate and then trigger a stateChanged message to exercise the
+    // disable / re-enable cleanup paths in checkState().
+    window.__stillTestState = state;
+    const onMessageListeners = [];
+    window.__stillTestDispatchMessage = (msg) => {
+      for (const fn of onMessageListeners) {
+        try { fn(msg); } catch (e) { /* ignore */ }
+      }
+    };
     window.browser = {
       storage: {
         local: {
-          get(keys, cb) { cb(state); },
+          get(keys, cb) { cb(window.__stillTestState); },
           set() {}
         }
       },
       runtime: {
-        onMessage: { addListener() {} },
+        onMessage: { addListener(fn) { onMessageListeners.push(fn); } },
         sendMessage(msg) {
           if (msg && msg.type === 'headProbe' && hpct) {
             return Promise.resolve({ ok: true, status: 200, contentType: hpct });
@@ -361,11 +379,11 @@ test.describe('Still — block and replace logic', () => {
     expect(sheetText).toContain('.test-host-rule-target');
   });
 
-  test('per-host CSS rule pack — host-rules sheet is removed when the extension is disabled / site is allowlisted', async ({ page }) => {
-    // Regression for the bug where allowlisting a host-rules site (e.g.
-    // president.mit.edu) would leave the curtain bars permanently pinned at
-    // left:100% — checkState() removed the main __still-hide block but not
-    // __still-host-rules, so the page-level !important override stuck around.
+  test('per-host CSS rule pack — host-rules sheet is not injected when extension starts disabled', async ({ page }) => {
+    // Covers the inject-skip guard inside the host-rules .then() — the fetch
+    // resolves AFTER checkState() has already concluded enabled:false, so
+    // the guard is what prevents the sheet from landing in the DOM. (The
+    // checkState removal line is exercised by the next test.)
     await injectContentScript(page, {
       hostRulesURL: baseURL,
       initialState: { enabled: false, allowlist: [] },
@@ -373,12 +391,41 @@ test.describe('Still — block and replace logic', () => {
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
 
-    // Once checkState() resolves with enabled:false, both the main style
-    // block AND the host-rules sheet should be gone from the DOM.
     await page.waitForFunction(() => {
       return !document.getElementById('__still-hide') &&
              !document.getElementById('__still-host-rules');
     }, { timeout: 5000 });
+  });
+
+  test('per-host CSS rule pack — host-rules sheet is removed when state flips to disabled', async ({ page }) => {
+    // Covers the cleanup path: extension starts enabled, the host-rules sheet
+    // gets injected, then the user toggles Still off (or allowlists the site).
+    // The stateChanged message handler triggers checkState(), which must
+    // remove BOTH __still-hide and __still-host-rules — otherwise the
+    // !important CSS override (e.g. .curtain-bar { left:100% }) stays pinned
+    // and the user keeps seeing the broken state on a site they just
+    // allowlisted to "let things through".
+    await injectContentScript(page, {
+      hostRulesURL: baseURL,
+      initialState: { enabled: true, allowlist: [] },
+    });
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // Wait for the host-rules sheet to actually appear (proves we're testing
+    // the cleanup path, not the inject-skip path).
+    await page.waitForFunction(() => !!document.getElementById('__still-host-rules'),
+      { timeout: 5000 });
+
+    // Flip state to disabled and dispatch the stateChanged message that the
+    // popup would normally send.
+    await page.evaluate(() => {
+      window.__stillTestState = { enabled: false, allowlist: [] };
+      window.__stillTestDispatchMessage({ type: 'stateChanged' });
+    });
+
+    await page.waitForFunction(() => !document.getElementById('__still-host-rules'),
+      { timeout: 5000 });
   });
 
   test('per-host CSS rule pack — bundled host-rules.json is well-formed and contains the MIT OP rule', async () => {
@@ -393,6 +440,44 @@ test.describe('Still — block and replace logic', () => {
     const joined = rules['president.mit.edu'].join('\n');
     expect(joined).toMatch(/\.curtain-bar/);
     expect(joined).toMatch(/!important/);
+  });
+
+  test('already-errored image with HEAD=unknown settles as static (does not hang visibility:hidden)', async ({ page }) => {
+    // Edge case from PR review: if the image has already errored
+    // (img.complete=true, img.naturalWidth=0) AND the HEAD probe returns
+    // 'unknown' (e.g. 404 here), the prior code added load/error listeners
+    // that would never fire — neither event re-triggers on a settled-error
+    // image — leaving the img visibility:hidden forever. Fix: when complete
+    // is true on entry to the unknown branch, classify immediately based on
+    // naturalWidth instead of waiting for events.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-broken';
+      img.src = base + '/broken-image';  // server returns 404
+      document.body.appendChild(img);
+    }, baseURL);
+
+    // Wait for the image to actually error out before injecting content.js,
+    // so by the time scanAll runs the img is already complete + naturalWidth=0.
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-broken');
+      return img && img.complete && img.naturalWidth === 0;
+    }, { timeout: 5000 });
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // The fix should settle data-still to 'static' (and unhide). Without the
+    // fix, this stays at 'probing' until the test times out.
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-broken');
+      return img && img.dataset.still === 'static';
+    }, { timeout: 5000 });
+
+    const visibility = await page.$eval('#img-broken', el => getComputedStyle(el).visibility);
+    expect(visibility).not.toBe('hidden');
   });
 
   test('falls back to background HEAD probe when content-script fetch is CORS-blocked (newyorker.com pattern)', async ({ page }) => {
