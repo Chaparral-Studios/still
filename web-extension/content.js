@@ -273,30 +273,59 @@
   // interstitial returning text/html with status 403 before the page passes
   // verification). Caller should defer the decision in that case.
 
+  function classifyByContentType(rawCt) {
+    const ct = (rawCt || '').toLowerCase();
+    if (ct.includes('image/gif')) return 'animated';
+    if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
+        ct.includes('image/bmp') || ct.includes('image/avif')) return 'static';
+    if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) return 'frame-data';
+    return 'unknown';
+  }
+
+  function probeViaBackground(url) {
+    // Content-script fetch is bound by page CORS, so cross-origin CDN URLs
+    // without Access-Control-Allow-Origin reject with TypeError. The service
+    // worker runs in the extension's own origin and uses our manifest
+    // host_permissions, so it can read response headers for any URL we're
+    // authorized for. Used as a fallback when the local HEAD throws.
+    // (newyorker.com homepage is the canonical case — animated GIFs are
+    // served from media.newyorker.com via URLs ending in `/undefined`.)
+    try {
+      const p = api.runtime.sendMessage({ type: 'headProbe', url });
+      if (!p || typeof p.then !== 'function') return Promise.resolve('unknown');
+      return p.then((response) => {
+        if (!response || !response.ok) return 'unknown';
+        const cls = classifyByContentType(response.contentType);
+        // 'frame-data' means we'd need byte-level inspection (animated WebP /
+        // APNG marker) — that's also a cross-origin range fetch we can't do
+        // from the content script, and we don't currently round-trip the
+        // bytes through the service worker. Treat as unknown for now.
+        return cls === 'frame-data' ? 'unknown' : cls;
+      }).catch(() => 'unknown');
+    } catch (e) {
+      return Promise.resolve('unknown');
+    }
+  }
+
   function detectAnimationForExtensionless(url) {
     return fetch(url, { method: 'HEAD', credentials: 'omit' })
       .then((res) => {
         if (!res.ok) return 'unknown';
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        if (ct.includes('image/gif')) return 'animated';
-        if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
-            ct.includes('image/bmp') || ct.includes('image/avif')) return 'static';
-        // WebP/APNG could be either — need to check the bytes
-        if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) {
-          return fetch(url, {
-            credentials: 'omit',
-            headers: { 'Range': 'bytes=0-4095' }
+        const cls = classifyByContentType(res.headers.get('content-type'));
+        if (cls !== 'frame-data') return cls;
+        // WebP / APNG / non-animated PNG: need byte-level inspection.
+        return fetch(url, {
+          credentials: 'omit',
+          headers: { 'Range': 'bytes=0-4095' }
+        })
+          .then((res2) => res2.arrayBuffer())
+          .then((buf) => {
+            const bytes = new Uint8Array(buf);
+            return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes)) ? 'animated' : 'static';
           })
-            .then((res2) => res2.arrayBuffer())
-            .then((buf) => {
-              const bytes = new Uint8Array(buf);
-              return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes)) ? 'animated' : 'static';
-            })
-            .catch(() => 'unknown');
-        }
-        return 'unknown';
+          .catch(() => 'unknown');
       })
-      .catch(() => 'unknown');
+      .catch(() => probeViaBackground(url));
   }
 
   // --- Spacer detection ---

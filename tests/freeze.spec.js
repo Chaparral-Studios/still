@@ -24,8 +24,18 @@ function createHandler(corsOrigin) {
       '.js': 'text/javascript'
     };
 
-    if (corsOrigin) {
+    // Skip CORS for the /no-cors-* paths — used by the test that exercises
+    // the background-mediated HEAD probe fallback (newyorker.com pattern).
+    if (corsOrigin && !urlPath.startsWith('/no-cors-')) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+
+    if (urlPath === '/no-cors-gif') {
+      const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
+      const data = fs.readFileSync(gifPath);
+      res.writeHead(200, { 'Content-Type': 'image/gif' });
+      res.end(data);
+      return;
     }
 
     // Host-rules JSON used by the per-host CSS rule pack test. Rule keys off
@@ -106,8 +116,13 @@ async function injectContentScript(page, opts = {}) {
   // 'host-rules.json' to that URL (the test server's /host-rules.json route).
   // Tests that don't care about host-rules can leave this unset; the loader's
   // fetch will fail silently.
+  // headProbeContentType: when set, the mocked browser.runtime.sendMessage
+  // will respond to {type:'headProbe'} messages with that content-type, as
+  // if the background service worker had successfully fetched the URL with
+  // its extension-origin permissions. Tests the cross-origin CORS fallback.
   const hostRulesURL = opts.hostRulesURL || '';
-  await page.addInitScript((u) => {
+  const headProbeContentType = opts.headProbeContentType || '';
+  await page.addInitScript(({ u, hpct }) => {
     window.browser = {
       storage: {
         local: {
@@ -117,11 +132,16 @@ async function injectContentScript(page, opts = {}) {
       },
       runtime: {
         onMessage: { addListener() {} },
-        sendMessage() { return Promise.resolve(); },
+        sendMessage(msg) {
+          if (msg && msg.type === 'headProbe' && hpct) {
+            return Promise.resolve({ ok: true, status: 200, contentType: hpct });
+          }
+          return Promise.resolve();
+        },
         getURL(path) { return u + '/' + path; }
       }
     };
-  }, hostRulesURL);
+  }, { u: hostRulesURL, hpct: headProbeContentType });
 }
 
 const PLACEHOLDER_PREFIX = "data:image/svg+xml,";
@@ -340,6 +360,39 @@ test.describe('Still — block and replace logic', () => {
     const joined = rules['president.mit.edu'].join('\n');
     expect(joined).toMatch(/\.curtain-bar/);
     expect(joined).toMatch(/!important/);
+  });
+
+  test('falls back to background HEAD probe when content-script fetch is CORS-blocked (newyorker.com pattern)', async ({ page }) => {
+    // Reproduces the New Yorker homepage bug: animated GIFs served from
+    // media.newyorker.com via URLs ending in `/undefined` (a JS template
+    // bug at NYer that ships anyway). The CDN serves Content-Type:
+    // image/gif but no Access-Control-Allow-Origin, so the content
+    // script's HEAD fetch from www.newyorker.com → media.newyorker.com
+    // rejects with TypeError. Path E used to give up there and mark the
+    // image static, leaking the animation. The fix routes the HEAD probe
+    // through the background service worker, which fetches in extension
+    // origin context and isn't bound by page CORS.
+    await injectContentScript(page, { headProbeContentType: 'image/gif' });
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((xo) => {
+      const img = document.createElement('img');
+      img.id = 'img-cors-blocked';
+      // Cross-origin (different port) + extensionless URL + no CORS header
+      // on the response. fetch HEAD will reject; load will succeed.
+      img.src = xo + '/no-cors-gif';
+      document.body.appendChild(img);
+    }, xOriginURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-cors-blocked');
+      return img && img.dataset.still === 'replaced';
+    }, { timeout: 8000 });
+
+    const src = await page.$eval('#img-cors-blocked', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
   test('retries detection on image load when initial HEAD fails (Cloudflare-interstitial race)', async ({ page }) => {
