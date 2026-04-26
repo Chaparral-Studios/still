@@ -83,6 +83,12 @@
       .then((rules) => {
         const list = rules[location.hostname];
         if (!list || !list.length) return;
+        // checkState() is async and may have run before this fetch resolves.
+        // If it concluded the extension is disabled / site is allowlisted,
+        // skip the inject — otherwise the sheet would land in the DOM after
+        // the cleanup pass and stick around forever (e.g. allowlisting
+        // president.mit.edu would still pin curtain bars at left:100%).
+        if (!enabled || siteAllowed) return;
         const sheet = document.createElement('style');
         sheet.id = '__still-host-rules';
         sheet.textContent = list.join('\n');
@@ -125,6 +131,11 @@
 
       if (!enabled || siteAllowed) {
         style.remove();
+        // Also drop the per-host CSS rule pack — otherwise allowlisting a
+        // site that has a host-rules entry (e.g. president.mit.edu) would
+        // leave the curtain bars permanently pinned at left:100%, since the
+        // !important rule keeps overriding the page's inline-style writes.
+        document.getElementById('__still-host-rules')?.remove();
         document.querySelectorAll('img[data-still="replacing"]').forEach((img) => {
           img.dataset.still = '';
           img.style.visibility = '';

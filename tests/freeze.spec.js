@@ -111,6 +111,15 @@ test.afterAll(async () => {
   if (xOriginServer) xOriginServer.close();
 });
 
+// Reset request-counter globals before each test so a counter incremented in
+// one test doesn't bleed into another that touches the same route. (e.g.
+// __cfHeadCount: tests beyond the first that hit /cf-protected-image would
+// otherwise see HEAD #2+ and get 200 instead of 403 — silently breaking the
+// interstitial-race simulation.)
+test.beforeEach(() => {
+  global.__cfHeadCount = 0;
+});
+
 async function injectContentScript(page, opts = {}) {
   // hostRulesURL: when set, the mocked browser.runtime.getURL() will resolve
   // 'host-rules.json' to that URL (the test server's /host-rules.json route).
@@ -120,13 +129,17 @@ async function injectContentScript(page, opts = {}) {
   // will respond to {type:'headProbe'} messages with that content-type, as
   // if the background service worker had successfully fetched the URL with
   // its extension-origin permissions. Tests the cross-origin CORS fallback.
+  // initialState: overrides the default {enabled:true, allowlist:[]} returned
+  // by the mocked storage.local.get. Use to simulate a disabled extension or
+  // an allowlisted site at scan time.
   const hostRulesURL = opts.hostRulesURL || '';
   const headProbeContentType = opts.headProbeContentType || '';
-  await page.addInitScript(({ u, hpct }) => {
+  const initialState = opts.initialState || { enabled: true, allowlist: [] };
+  await page.addInitScript(({ u, hpct, state }) => {
     window.browser = {
       storage: {
         local: {
-          get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+          get(keys, cb) { cb(state); },
           set() {}
         }
       },
@@ -141,7 +154,7 @@ async function injectContentScript(page, opts = {}) {
         getURL(path) { return u + '/' + path; }
       }
     };
-  }, { u: hostRulesURL, hpct: headProbeContentType });
+  }, { u: hostRulesURL, hpct: headProbeContentType, state: initialState });
 }
 
 const PLACEHOLDER_PREFIX = "data:image/svg+xml,";
@@ -348,6 +361,26 @@ test.describe('Still — block and replace logic', () => {
     expect(sheetText).toContain('.test-host-rule-target');
   });
 
+  test('per-host CSS rule pack — host-rules sheet is removed when the extension is disabled / site is allowlisted', async ({ page }) => {
+    // Regression for the bug where allowlisting a host-rules site (e.g.
+    // president.mit.edu) would leave the curtain bars permanently pinned at
+    // left:100% — checkState() removed the main __still-hide block but not
+    // __still-host-rules, so the page-level !important override stuck around.
+    await injectContentScript(page, {
+      hostRulesURL: baseURL,
+      initialState: { enabled: false, allowlist: [] },
+    });
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // Once checkState() resolves with enabled:false, both the main style
+    // block AND the host-rules sheet should be gone from the DOM.
+    await page.waitForFunction(() => {
+      return !document.getElementById('__still-hide') &&
+             !document.getElementById('__still-host-rules');
+    }, { timeout: 5000 });
+  });
+
   test('per-host CSS rule pack — bundled host-rules.json is well-formed and contains the MIT OP rule', async () => {
     const rulesPath = path.resolve(__dirname, '..', 'web-extension', 'host-rules.json');
     const rules = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
@@ -402,7 +435,8 @@ test.describe('Still — block and replace logic', () => {
     // came back 403/text-html. After the image then loaded successfully, no
     // re-check fired and the GIF animated unblocked. The fix: treat HEAD
     // failure/unknown as deferred, retry on `load`.
-    global.__cfHeadCount = 0;
+    // (__cfHeadCount reset is in test.beforeEach so other tests touching
+    // /cf-protected-image stay deterministic too.)
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
 

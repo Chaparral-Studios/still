@@ -148,6 +148,14 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // The service worker fetches in the extension's own origin context with
     // the manifest's host_permissions, so it can read response headers for
     // any URL we're authorized for.
+    //
+    // Defense-in-depth: only allow http(s). A malicious page setting
+    // `<img src="javascript:...">` or `<img src="file://...">` would
+    // otherwise hand us a privileged fetch we have no business making.
+    if (typeof msg.url !== 'string' || !/^https?:\/\//i.test(msg.url)) {
+      sendResponse({ ok: false, error: 'invalid url' });
+      return true;
+    }
     fetch(msg.url, { method: 'HEAD', credentials: 'omit' })
       .then((res) => sendResponse({
         ok: res.ok,
