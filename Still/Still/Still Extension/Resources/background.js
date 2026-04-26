@@ -139,6 +139,25 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  if (msg.type === 'headProbe') {
+    // Cross-origin HEAD probe on behalf of a content script.
+    // Content-script `fetch` is bound by page CORS, so HEAD requests against
+    // CDN-hosted images (e.g. media.newyorker.com/.../undefined animated GIFs
+    // delivered without Access-Control-Allow-Origin) reject with TypeError —
+    // and Path E ends up marking the image static, leaking the animation.
+    // The service worker fetches in the extension's own origin context with
+    // the manifest's host_permissions, so it can read response headers for
+    // any URL we're authorized for.
+    fetch(msg.url, { method: 'HEAD', credentials: 'omit' })
+      .then((res) => sendResponse({
+        ok: res.ok,
+        status: res.status,
+        contentType: res.headers.get('content-type') || '',
+      }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true; // async response
+  }
+
   if (msg.type === 'getState') {
     storageGet(['enabled', 'allowlist']).then((result) => {
       const host = msg.host || '';
