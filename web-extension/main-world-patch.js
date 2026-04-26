@@ -61,4 +61,40 @@
     }
     return origSetAttributeNS.apply(this, arguments);
   };
+
+  // --- jQuery animation disable ---
+  // jQuery's .animate / .fadeIn / .slideUp etc use requestAnimationFrame and
+  // write inline style per frame — invisible to our CSS transition override
+  // and the WAAPI cancellation pass (they're not Animation objects). Pages
+  // like president.mit.edu's hero "curtain-bars" sweep 6 colored bars across
+  // the viewport via `$(el).delay(N).animate({left:'98%'}, 500–700)` — a
+  // migraine-grade flourish that the rest of our pipeline misses.
+  //
+  // jQuery ships a global kill-switch: `jQuery.fx.off = true` completes every
+  // animation synchronously on the next tick, skipping straight to the end
+  // state. We intercept `window.jQuery` and `window.$` via defineProperty so
+  // the flag is flipped the instant the page assigns either one. Zepto uses
+  // the same `fx.off` convention so this patch covers it too.
+  function patchAnimatedLibrary(v) {
+    // jQuery's `.fx` is `Tween.prototype.init`, which is a function (with
+    // .step, .speeds, .tick, .off attached). Zepto's `.fx` is also a function
+    // (constructor). Check for function OR object — excluding only null/prim.
+    if (v && v.fx && (typeof v.fx === 'object' || typeof v.fx === 'function')) {
+      try { v.fx.off = true; } catch (e) { /* frozen / sealed fx */ }
+    }
+    return v;
+  }
+  function defineJQueryGlobal(name) {
+    let slot = window[name];
+    if (slot) patchAnimatedLibrary(slot);
+    try {
+      Object.defineProperty(window, name, {
+        configurable: true,
+        get: function () { return slot; },
+        set: function (val) { slot = patchAnimatedLibrary(val); },
+      });
+    } catch (e) { /* existing non-configurable property; best-effort only */ }
+  }
+  defineJQueryGlobal('jQuery');
+  defineJQueryGlobal('$');
 })();

@@ -24,8 +24,37 @@ function createHandler(corsOrigin) {
       '.js': 'text/javascript'
     };
 
-    if (corsOrigin) {
+    // Skip CORS for the /no-cors-* paths — used by the test that exercises
+    // the background-mediated HEAD probe fallback (newyorker.com pattern).
+    if (corsOrigin && !urlPath.startsWith('/no-cors-')) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+
+    if (urlPath === '/no-cors-gif') {
+      const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
+      const data = fs.readFileSync(gifPath);
+      res.writeHead(200, { 'Content-Type': 'image/gif' });
+      res.end(data);
+      return;
+    }
+
+    // Host-rules JSON used by the per-host CSS rule pack test. Rule keys off
+    // the test server's hostname (127.0.0.1) and pins a known property so the
+    // test can verify the override actually beats inline style writes.
+    if (urlPath === '/host-rules.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        '127.0.0.1': ['.test-host-rule-target { left: 999px !important; }']
+      }));
+      return;
+    }
+
+    // Always 404 — used to construct an already-errored image whose
+    // load/error events have already fired before content.js scans it.
+    if (urlPath === '/broken-image') {
+      res.writeHead(404, { 'Content-Type': 'text/html' });
+      res.end('not found');
+      return;
     }
 
     if (urlPath === '/cdn-image') {
@@ -33,6 +62,34 @@ function createHandler(corsOrigin) {
       const data = fs.readFileSync(gifPath);
       res.writeHead(200, { 'Content-Type': 'image/gif' });
       res.end(data);
+      return;
+    }
+
+    // Simulates the Cloudflare-interstitial race seen on axios.com:
+    // the first HEAD request gets 403/text-html (page is mid-verification),
+    // subsequent HEADs and the GET return the real gif. The image GET is
+    // also delayed slightly so the content script has time to install its
+    // retry listener before the load event fires.
+    if (urlPath === '/cf-protected-image') {
+      if (req.method === 'HEAD') {
+        global.__cfHeadCount = (global.__cfHeadCount || 0) + 1;
+        if (global.__cfHeadCount === 1) {
+          res.writeHead(403, { 'Content-Type': 'text/html' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': '1024' });
+        res.end();
+        return;
+      }
+      // GET — return the real gif after a short delay so the listener gets
+      // attached first.
+      setTimeout(() => {
+        const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
+        const data = fs.readFileSync(gifPath);
+        res.writeHead(200, { 'Content-Type': 'image/gif' });
+        res.end(data);
+      }, 300);
       return;
     }
 
@@ -62,21 +119,60 @@ test.afterAll(async () => {
   if (xOriginServer) xOriginServer.close();
 });
 
-async function injectContentScript(page) {
-  await page.addInitScript(() => {
+// Reset request-counter globals before each test so a counter incremented in
+// one test doesn't bleed into another that touches the same route. (e.g.
+// __cfHeadCount: tests beyond the first that hit /cf-protected-image would
+// otherwise see HEAD #2+ and get 200 instead of 403 — silently breaking the
+// interstitial-race simulation.)
+test.beforeEach(() => {
+  global.__cfHeadCount = 0;
+});
+
+async function injectContentScript(page, opts = {}) {
+  // hostRulesURL: when set, the mocked browser.runtime.getURL() will resolve
+  // 'host-rules.json' to that URL (the test server's /host-rules.json route).
+  // Tests that don't care about host-rules can leave this unset; the loader's
+  // fetch will fail silently.
+  // headProbeContentType: when set, the mocked browser.runtime.sendMessage
+  // will respond to {type:'headProbe'} messages with that content-type, as
+  // if the background service worker had successfully fetched the URL with
+  // its extension-origin permissions. Tests the cross-origin CORS fallback.
+  // initialState: overrides the default {enabled:true, allowlist:[]} returned
+  // by the mocked storage.local.get. Use to simulate a disabled extension or
+  // an allowlisted site at scan time.
+  const hostRulesURL = opts.hostRulesURL || '';
+  const headProbeContentType = opts.headProbeContentType || '';
+  const initialState = opts.initialState || { enabled: true, allowlist: [] };
+  await page.addInitScript(({ u, hpct, state }) => {
+    // Mutable state lives on a window-level slot so tests can flip it via
+    // page.evaluate and then trigger a stateChanged message to exercise the
+    // disable / re-enable cleanup paths in checkState().
+    window.__stillTestState = state;
+    const onMessageListeners = [];
+    window.__stillTestDispatchMessage = (msg) => {
+      for (const fn of onMessageListeners) {
+        try { fn(msg); } catch (e) { /* ignore */ }
+      }
+    };
     window.browser = {
       storage: {
         local: {
-          get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+          get(keys, cb) { cb(window.__stillTestState); },
           set() {}
         }
       },
       runtime: {
-        onMessage: { addListener() {} },
-        sendMessage() { return Promise.resolve(); }
+        onMessage: { addListener(fn) { onMessageListeners.push(fn); } },
+        sendMessage(msg) {
+          if (msg && msg.type === 'headProbe' && hpct) {
+            return Promise.resolve({ ok: true, status: 200, contentType: hpct });
+          }
+          return Promise.resolve();
+        },
+        getURL(path) { return u + '/' + path; }
       }
     };
-  });
+  }, { u: hostRulesURL, hpct: headProbeContentType, state: initialState });
 }
 
 const PLACEHOLDER_PREFIX = "data:image/svg+xml,";
@@ -246,6 +342,204 @@ test.describe('Still — block and replace logic', () => {
     }, { timeout: 5000 });
 
     const src = await page.$eval('#img-extensionless', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('per-host CSS rule pack — applies matching rules and beats inline style', async ({ page }) => {
+    // Verifies the host-rules.json mechanism: content.js fetches the rule pack
+    // at init, finds rules keyed to location.hostname, and injects them as an
+    // !important stylesheet that overrides inline-style writes (the
+    // jQuery-animate / curtain-bar pattern from president.mit.edu).
+    await injectContentScript(page, { hostRulesURL: baseURL });
+    await page.goto(baseURL + '/test-page.html');
+
+    // Element with the targeted class + an inline style the rule should beat.
+    await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.id = 'host-rule-target';
+      el.className = 'test-host-rule-target';
+      el.style.position = 'absolute';
+      el.style.left = '0px';
+      document.body.appendChild(el);
+    });
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // The rule pins left: 999px !important; even though inline style says 0px,
+    // computed style should reflect the rule.
+    await page.waitForFunction(() => {
+      const el = document.getElementById('host-rule-target');
+      return el && getComputedStyle(el).left === '999px';
+    }, { timeout: 5000 });
+
+    // And confirm the host-rules style block actually exists in the DOM
+    const sheetText = await page.evaluate(() =>
+      (document.getElementById('__still-host-rules') || {}).textContent
+    );
+    expect(sheetText).toContain('.test-host-rule-target');
+  });
+
+  test('per-host CSS rule pack — host-rules sheet is not injected when extension starts disabled', async ({ page }) => {
+    // Covers the inject-skip guard inside the host-rules .then() — the fetch
+    // resolves AFTER checkState() has already concluded enabled:false, so
+    // the guard is what prevents the sheet from landing in the DOM. (The
+    // checkState removal line is exercised by the next test.)
+    await injectContentScript(page, {
+      hostRulesURL: baseURL,
+      initialState: { enabled: false, allowlist: [] },
+    });
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      return !document.getElementById('__still-hide') &&
+             !document.getElementById('__still-host-rules');
+    }, { timeout: 5000 });
+  });
+
+  test('per-host CSS rule pack — host-rules sheet is removed when state flips to disabled', async ({ page }) => {
+    // Covers the cleanup path: extension starts enabled, the host-rules sheet
+    // gets injected, then the user toggles Still off (or allowlists the site).
+    // The stateChanged message handler triggers checkState(), which must
+    // remove BOTH __still-hide and __still-host-rules — otherwise the
+    // !important CSS override (e.g. .curtain-bar { left:100% }) stays pinned
+    // and the user keeps seeing the broken state on a site they just
+    // allowlisted to "let things through".
+    await injectContentScript(page, {
+      hostRulesURL: baseURL,
+      initialState: { enabled: true, allowlist: [] },
+    });
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // Wait for the host-rules sheet to actually appear (proves we're testing
+    // the cleanup path, not the inject-skip path).
+    await page.waitForFunction(() => !!document.getElementById('__still-host-rules'),
+      { timeout: 5000 });
+
+    // Flip state to disabled and dispatch the stateChanged message that the
+    // popup would normally send.
+    await page.evaluate(() => {
+      window.__stillTestState = { enabled: false, allowlist: [] };
+      window.__stillTestDispatchMessage({ type: 'stateChanged' });
+    });
+
+    await page.waitForFunction(() => !document.getElementById('__still-host-rules'),
+      { timeout: 5000 });
+  });
+
+  test('per-host CSS rule pack — bundled host-rules.json is well-formed and contains the MIT OP rule', async () => {
+    const rulesPath = path.resolve(__dirname, '..', 'web-extension', 'host-rules.json');
+    const rules = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
+    expect(typeof rules).toBe('object');
+    // toHaveProperty treats dots as nested paths — pass key as array for
+    // literal dots in the host name.
+    expect(rules).toHaveProperty(['president.mit.edu']);
+    expect(Array.isArray(rules['president.mit.edu'])).toBe(true);
+    // Must contain the curtain-bar fix that defuses the hero flourish.
+    const joined = rules['president.mit.edu'].join('\n');
+    expect(joined).toMatch(/\.curtain-bar/);
+    expect(joined).toMatch(/!important/);
+  });
+
+  test('already-errored image with HEAD=unknown settles as static (does not hang visibility:hidden)', async ({ page }) => {
+    // Edge case from PR review: if the image has already errored
+    // (img.complete=true, img.naturalWidth=0) AND the HEAD probe returns
+    // 'unknown' (e.g. 404 here), the prior code added load/error listeners
+    // that would never fire — neither event re-triggers on a settled-error
+    // image — leaving the img visibility:hidden forever. Fix: when complete
+    // is true on entry to the unknown branch, classify immediately based on
+    // naturalWidth instead of waiting for events.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-broken';
+      img.src = base + '/broken-image';  // server returns 404
+      document.body.appendChild(img);
+    }, baseURL);
+
+    // Wait for the image to actually error out before injecting content.js,
+    // so by the time scanAll runs the img is already complete + naturalWidth=0.
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-broken');
+      return img && img.complete && img.naturalWidth === 0;
+    }, { timeout: 5000 });
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    // The fix should settle data-still to 'static' (and unhide). Without the
+    // fix, this stays at 'probing' until the test times out.
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-broken');
+      return img && img.dataset.still === 'static';
+    }, { timeout: 5000 });
+
+    const visibility = await page.$eval('#img-broken', el => getComputedStyle(el).visibility);
+    expect(visibility).not.toBe('hidden');
+  });
+
+  test('falls back to background HEAD probe when content-script fetch is CORS-blocked (newyorker.com pattern)', async ({ page }) => {
+    // Reproduces the New Yorker homepage bug: animated GIFs served from
+    // media.newyorker.com via URLs ending in `/undefined` (a JS template
+    // bug at NYer that ships anyway). The CDN serves Content-Type:
+    // image/gif but no Access-Control-Allow-Origin, so the content
+    // script's HEAD fetch from www.newyorker.com → media.newyorker.com
+    // rejects with TypeError. Path E used to give up there and mark the
+    // image static, leaking the animation. The fix routes the HEAD probe
+    // through the background service worker, which fetches in extension
+    // origin context and isn't bound by page CORS.
+    await injectContentScript(page, { headProbeContentType: 'image/gif' });
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((xo) => {
+      const img = document.createElement('img');
+      img.id = 'img-cors-blocked';
+      // Cross-origin (different port) + extensionless URL + no CORS header
+      // on the response. fetch HEAD will reject; load will succeed.
+      img.src = xo + '/no-cors-gif';
+      document.body.appendChild(img);
+    }, xOriginURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-cors-blocked');
+      return img && img.dataset.still === 'replaced';
+    }, { timeout: 8000 });
+
+    const src = await page.$eval('#img-cors-blocked', el => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('retries detection on image load when initial HEAD fails (Cloudflare-interstitial race)', async ({ page }) => {
+    // Reproduces the axios.com landing-page bug: extensionless image URL
+    // (Next.js /_next/image proxy) was wrongly marked `static` because the
+    // initial HEAD landed during Cloudflare's "Just a moment..." phase and
+    // came back 403/text-html. After the image then loaded successfully, no
+    // re-check fired and the GIF animated unblocked. The fix: treat HEAD
+    // failure/unknown as deferred, retry on `load`.
+    // (__cfHeadCount reset is in test.beforeEach so other tests touching
+    // /cf-protected-image stay deterministic too.)
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-cf';
+      img.src = base + '/cf-protected-image';
+      document.body.appendChild(img);
+    }, baseURL);
+
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-cf');
+      return img && img.dataset.still === 'replaced';
+    }, { timeout: 8000 });
+
+    const src = await page.$eval('#img-cf', el => el.src);
     expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 

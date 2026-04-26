@@ -67,6 +67,36 @@
 
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
+  // --- Per-host CSS rule pack ---
+  // host-rules.json is a curated list of `!important` CSS overrides for sites
+  // where our general defenses don't catch all motion (e.g. JS-driven jQuery
+  // animations against elements with predictable class names — see
+  // president.mit.edu's `.curtain-bar`). Rules are pinned with `!important`
+  // so they beat any inline styles the page's animation library writes per
+  // frame — the animation still "runs", but each frame's value is overridden
+  // before paint, so nothing visibly moves. Async-loaded but applied before
+  // the kinds of animations we target typically fire (jQuery animate triggers
+  // on image-load events, hundreds of ms after document_start).
+  if (api.runtime && typeof api.runtime.getURL === 'function') {
+    fetch(api.runtime.getURL('host-rules.json'))
+      .then((r) => r.json())
+      .then((rules) => {
+        const list = rules[location.hostname];
+        if (!list || !list.length) return;
+        // checkState() is async and may have run before this fetch resolves.
+        // If it concluded the extension is disabled / site is allowlisted,
+        // skip the inject — otherwise the sheet would land in the DOM after
+        // the cleanup pass and stick around forever (e.g. allowlisting
+        // president.mit.edu would still pin curtain bars at left:100%).
+        if (!enabled || siteAllowed) return;
+        const sheet = document.createElement('style');
+        sheet.id = '__still-host-rules';
+        sheet.textContent = list.join('\n');
+        (document.head || document.documentElement).appendChild(sheet);
+      })
+      .catch(() => {});
+  }
+
   // --- Helpers: wrap callback APIs to handle both Promise (Safari) and callback (Chrome) ---
 
   function storageGet(keys) {
@@ -101,11 +131,22 @@
 
       if (!enabled || siteAllowed) {
         style.remove();
+        // Also drop the per-host CSS rule pack — otherwise allowlisting a
+        // site that has a host-rules entry (e.g. president.mit.edu) would
+        // leave the curtain bars permanently pinned at left:100%, since the
+        // !important rule keeps overriding the page's inline-style writes.
+        document.getElementById('__still-host-rules')?.remove();
         document.querySelectorAll('img[data-still="replacing"]').forEach((img) => {
           img.dataset.still = '';
           img.style.visibility = '';
         });
       } else {
+        // Note: init() short-circuits via `initialized` after its first run,
+        // so flipping disabled→enabled on the same page won't re-inject
+        // `style`, the host-rules sheet, or re-scan for missed images. The
+        // popup's expected UX is "toggle requires reload to take effect" and
+        // this preserves that. If we ever want hot re-enable, init() and the
+        // host-rules injector would both need to be made idempotent.
         init();
       }
     });
@@ -243,32 +284,65 @@
   }
 
   // --- Detect animation for extensionless URLs ---
-  // Two-step: HEAD to get content-type, then partial fetch if needed
+  // Two-step: HEAD to get content-type, then partial fetch if needed.
+  // Returns 'animated', 'static', or 'unknown'. 'unknown' means HEAD failed
+  // or returned a content-type we can't classify (e.g., a Cloudflare
+  // interstitial returning text/html with status 403 before the page passes
+  // verification). Caller should defer the decision in that case.
+
+  function classifyByContentType(rawCt) {
+    const ct = (rawCt || '').toLowerCase();
+    if (ct.includes('image/gif')) return 'animated';
+    if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
+        ct.includes('image/bmp') || ct.includes('image/avif')) return 'static';
+    if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) return 'frame-data';
+    return 'unknown';
+  }
+
+  function probeViaBackground(url) {
+    // Content-script fetch is bound by page CORS, so cross-origin CDN URLs
+    // without Access-Control-Allow-Origin reject with TypeError. The service
+    // worker runs in the extension's own origin and uses our manifest
+    // host_permissions, so it can read response headers for any URL we're
+    // authorized for. Used as a fallback when the local HEAD throws.
+    // (newyorker.com homepage is the canonical case — animated GIFs are
+    // served from media.newyorker.com via URLs ending in `/undefined`.)
+    try {
+      const p = api.runtime.sendMessage({ type: 'headProbe', url });
+      if (!p || typeof p.then !== 'function') return Promise.resolve('unknown');
+      return p.then((response) => {
+        if (!response || !response.ok) return 'unknown';
+        const cls = classifyByContentType(response.contentType);
+        // 'frame-data' means we'd need byte-level inspection (animated WebP /
+        // APNG marker) — that's also a cross-origin range fetch we can't do
+        // from the content script, and we don't currently round-trip the
+        // bytes through the service worker. Treat as unknown for now.
+        return cls === 'frame-data' ? 'unknown' : cls;
+      }).catch(() => 'unknown');
+    } catch (e) {
+      return Promise.resolve('unknown');
+    }
+  }
 
   function detectAnimationForExtensionless(url) {
     return fetch(url, { method: 'HEAD', credentials: 'omit' })
       .then((res) => {
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        // GIF is always animated
-        if (ct.includes('image/gif')) return true;
-        // Static formats — definitely not animated
-        if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
-            ct.includes('image/bmp') || ct.includes('image/avif')) return false;
-        // WebP/APNG could be either — need to check the bytes
-        if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) {
-          return fetch(url, {
-            credentials: 'omit',
-            headers: { 'Range': 'bytes=0-4095' }
+        if (!res.ok) return 'unknown';
+        const cls = classifyByContentType(res.headers.get('content-type'));
+        if (cls !== 'frame-data') return cls;
+        // WebP / APNG / non-animated PNG: need byte-level inspection.
+        return fetch(url, {
+          credentials: 'omit',
+          headers: { 'Range': 'bytes=0-4095' }
+        })
+          .then((res2) => res2.arrayBuffer())
+          .then((buf) => {
+            const bytes = new Uint8Array(buf);
+            return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes)) ? 'animated' : 'static';
           })
-            .then((res2) => res2.arrayBuffer())
-            .then((buf) => {
-              const bytes = new Uint8Array(buf);
-              return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
-            });
-        }
-        return false;
+          .catch(() => 'unknown');
       })
-      .catch(() => false);
+      .catch(() => probeViaBackground(url));
   }
 
   // --- Spacer detection ---
@@ -415,12 +489,39 @@
       img.dataset.still = 'probing';
       img.style.visibility = 'hidden';
 
-      detectAnimationForExtensionless(src).then((animated) => {
-        if (animated) {
+      const apply = (result) => {
+        if (result === 'animated') {
           replaceWithPlaceholder(img);
         } else {
+          // 'static' or final 'unknown' — fail open (show image). The retry
+          // path below already handled the recoverable-unknown case.
           img.dataset.still = 'static';
           img.style.visibility = '';
+        }
+      };
+
+      detectAnimationForExtensionless(src).then((result) => {
+        if (result !== 'unknown') {
+          apply(result);
+          return;
+        }
+        // HEAD failed at scan time. Common cause: the page navigated through
+        // Cloudflare's "Just a moment..." interstitial, our scan ran on the
+        // pre-verification document, and the resource was 403'd. Defer the
+        // decision until the image actually loads — by then the resource is
+        // definitely fetchable, and a fresh HEAD will return real headers.
+        const retry = () => detectAnimationForExtensionless(src).then(apply);
+        if (img.complete) {
+          // Image is already done loading. Either it succeeded
+          // (naturalWidth > 0 → retry the HEAD now that the resource is
+          // definitely live) or it errored (naturalWidth === 0 → no
+          // future load/error event will fire, so settle as static now;
+          // otherwise the image would stay visibility:hidden forever).
+          if (img.naturalWidth > 0) retry();
+          else apply('static');
+        } else {
+          img.addEventListener('load', retry, { once: true });
+          img.addEventListener('error', () => apply('static'), { once: true });
         }
       });
     }
