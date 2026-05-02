@@ -98,20 +98,49 @@
   defineJQueryGlobal('jQuery');
   defineJQueryGlobal('$');
 
-  // --- HTMLMediaElement.play() interception for tagged image-substitute videos ---
+  // --- HTMLMediaElement.play() interception for image-substitute videos ---
   // Inline <video> previews used as animated-GIF substitutes (Google Shopping
   // AR spin previews on the SERP, etc.) bypass autoplay blockers because they
   // ship with `muted+playsinline` (spec-exempt) and no `autoplay` attribute —
-  // the page calls `.play()` from an IntersectionObserver/hover handler. Our
-  // content script (isolated world) tags those elements with
-  // `data-still-video="blocked"`, but its property override on `play` doesn't
-  // apply when page script calls `play()` from this main world. So we patch
-  // the prototype here, gated by the data attribute (which IS shared across
-  // worlds because it's a real DOM attribute).
+  // the page calls `.play()` from an IntersectionObserver/hover handler.
+  //
+  // We catch them two ways here, both synchronous to the .play() call so
+  // there's no window in which a video can slip through:
+  //   1. data-still-video="blocked" attribute (set by content.js when it
+  //      walks the DOM; also set by us below when we match by URL).
+  //   2. URL pattern check on src / currentSrc / <source> children. This is
+  //      the race-safe path: Google inserts a video card and calls .play()
+  //      in the SAME tick, before content.js's MutationObserver fires. If we
+  //      gated only on the tag, the first .play() call would slip through
+  //      (user reported: "after I scrolled down and started hovering, later
+  //      stuff started playing"). The URL check runs before content.js has
+  //      to do anything.
+  const VIDEO_PREVIEW_BLOCKLIST_RE = /\/\/[^/]*\.gstatic\.com\/search-ar-dev\//i;
+  function srcMatchesBlocklist(v) {
+    const csrc = v.currentSrc;
+    if (csrc && VIDEO_PREVIEW_BLOCKLIST_RE.test(csrc)) return true;
+    const src = v.getAttribute && v.getAttribute('src');
+    if (src && VIDEO_PREVIEW_BLOCKLIST_RE.test(src)) return true;
+    if (v.querySelectorAll) {
+      const sources = v.querySelectorAll('source');
+      for (let i = 0; i < sources.length; i++) {
+        const ss = sources[i].getAttribute && sources[i].getAttribute('src');
+        if (ss && VIDEO_PREVIEW_BLOCKLIST_RE.test(ss)) return true;
+      }
+    }
+    return false;
+  }
   const origMediaPlay = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () {
-    if (this.getAttribute && this.getAttribute('data-still-video') === 'blocked') {
+    const tagged = this.getAttribute && this.getAttribute('data-still-video') === 'blocked';
+    if (tagged || srcMatchesBlocklist(this)) {
       try { this.pause(); } catch (e) {}
+      // Tag the element so the CSS hide rule + MutationObserver re-checks
+      // also see it. setAttribute writes a real DOM attribute that's visible
+      // to the isolated-world content script too.
+      try {
+        if (!tagged && this.setAttribute) this.setAttribute('data-still-video', 'blocked');
+      } catch (e) {}
       return Promise.resolve();
     }
     return origMediaPlay.apply(this, arguments);
