@@ -61,6 +61,12 @@ const scrollThenSit = process.argv.includes('--scroll-then-sit');
 // axios.com require even with valid cookies. Channel 'chrome' is set up by
 // `npx playwright install chrome`.
 const useSystemChrome = process.argv.includes('--system-chrome');
+// Deterministically trigger Google Shopping-style AR-video previews: after
+// navigation + scroll, call .play() on every <video> on the page. Used to
+// verify that the gstatic.com/search-ar-dev blocker actually prevents
+// playback in real Chrome — without this flag, autoplay is gated on a
+// signed-in/personalized SERP that stealth Chrome doesn't reliably get.
+const forcePlayVideos = process.argv.includes('--force-play-videos');
 
 mkdirSync(outDir, { recursive: true });
 const framesDir = join(outDir, 'frames');
@@ -161,6 +167,25 @@ if (scrollThenSit) {
     }
     // Remaining time of the capture window: just sit.
   })().catch((e) => console.error('scroll workload error:', (e as Error).message));
+}
+
+if (forcePlayVideos) {
+  (async () => {
+    // Wait for ffmpeg to settle and (if scrolling) for the scroll loop to
+    // have moved videos into view. Then call play() on every <video> — this
+    // is what Google's IntersectionObserver does, but we do it deterministically
+    // so the test isn't gated on Google's anti-bot detection deciding to
+    // ship the AR carousel to this session.
+    const settle = scrollThenSit ? 5500 : 1500;
+    await page.waitForTimeout(settle);
+    try {
+      await page.evaluate(() => {
+        for (const v of Array.from(document.querySelectorAll('video'))) {
+          try { v.play(); } catch (e) {}
+        }
+      });
+    } catch (e) {}
+  })().catch((e) => console.error('force-play-videos error:', (e as Error).message));
 }
 
 await done;
