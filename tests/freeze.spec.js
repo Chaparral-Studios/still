@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 
 const CONTENT_SCRIPT = path.resolve(__dirname, '..', 'web-extension', 'content.js');
+const MAIN_WORLD_PATCH = path.resolve(__dirname, '..', 'web-extension', 'main-world-patch.js');
 const TESTS_DIR = path.resolve(__dirname);
 
 let server;
@@ -1258,5 +1259,78 @@ test.describe('Still — block and replace logic', () => {
     // Fill should be upgraded from 'none' to 'forwards' so the end state
     // persists after currentTime == duration.
     expect(result.noneFill).toBe('forwards');
+  });
+
+  test('blocks gstatic search-ar-dev video previews and intercepts programmatic .play()', async ({ page }) => {
+    // Google Shopping serves auto-spinning product previews as small muted
+    // playsinline <video> elements pointed at gstatic.com/search-ar-dev/...
+    // mp4. They bypass autoplay blockers (no `autoplay` attribute, muted +
+    // playsinline are spec-exempt) by calling videoEl.play() from an
+    // IntersectionObserver/hover handler. Our defense:
+    //   1. content.js tags matching elements with data-still-video="blocked"
+    //      and pauses them.
+    //   2. main-world-patch.js patches HTMLMediaElement.prototype.play so
+    //      that calling .play() on a tagged element is a no-op (returns a
+    //      resolved Promise without starting playback).
+    // Both are required: the prototype patch must live in the main world
+    // (where page scripts call play), and the tag must live on the DOM
+    // attribute (which IS shared across worlds).
+    const fs = require('fs');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <video id="ar"   muted playsinline preload="none"
+               src="https://www.gstatic.com/search-ar-dev/renders/abc/square_video.mp4"></video>
+        <video id="ok"   muted playsinline preload="none"
+               src="https://example.com/legitimate.mp4"></video>
+      </body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
+
+    // Give the initial scan a tick to tag the matching video.
+    await page.waitForFunction(
+      () => document.getElementById('ar').dataset.stillVideo === 'blocked',
+      { timeout: 3000 }
+    );
+
+    const result = await page.evaluate(async () => {
+      const ar = document.getElementById('ar');
+      const ok = document.getElementById('ok');
+      // Tag check + .play() interception check.
+      const arPlayResult = await ar.play().then(() => 'resolved').catch((e) => 'rejected:' + e.name);
+      // For the unrelated video we don't actually want it to start playing in
+      // the test (would be flaky with no-src loading) — what we care about is
+      // that the prototype patch DIDN'T short-circuit it. We verify by
+      // checking the function identity: ar's .play returns Promise.resolve()
+      // immediately; ok's .play would attempt to load the src.
+      const okIntercepted = ok.dataset.stillVideo === 'blocked';
+      // Cancel ok's load attempt cleanly to avoid test-runtime warnings.
+      try { ok.removeAttribute('src'); ok.load(); } catch (e) {}
+      return {
+        arTag: ar.dataset.stillVideo,
+        arPaused: ar.paused,
+        arPlayResult,
+        okTag: ok.dataset.stillVideo || null,
+        okIntercepted,
+      };
+    });
+    expect(result.arTag).toBe('blocked');
+    expect(result.arPaused).toBe(true);              // never started despite play()
+    expect(result.arPlayResult).toBe('resolved');    // play() returns resolved Promise
+    expect(result.okTag).toBeNull();                 // legitimate video untouched
+    expect(result.okIntercepted).toBe(false);
   });
 });

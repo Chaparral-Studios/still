@@ -97,4 +97,23 @@
   }
   defineJQueryGlobal('jQuery');
   defineJQueryGlobal('$');
+
+  // --- HTMLMediaElement.play() interception for tagged image-substitute videos ---
+  // Inline <video> previews used as animated-GIF substitutes (Google Shopping
+  // AR spin previews on the SERP, etc.) bypass autoplay blockers because they
+  // ship with `muted+playsinline` (spec-exempt) and no `autoplay` attribute —
+  // the page calls `.play()` from an IntersectionObserver/hover handler. Our
+  // content script (isolated world) tags those elements with
+  // `data-still-video="blocked"`, but its property override on `play` doesn't
+  // apply when page script calls `play()` from this main world. So we patch
+  // the prototype here, gated by the data attribute (which IS shared across
+  // worlds because it's a real DOM attribute).
+  const origMediaPlay = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () {
+    if (this.getAttribute && this.getAttribute('data-still-video') === 'blocked') {
+      try { this.pause(); } catch (e) {}
+      return Promise.resolve();
+    }
+    return origMediaPlay.apply(this, arguments);
+  };
 })();
