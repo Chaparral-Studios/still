@@ -19,6 +19,17 @@
  * elements with that attribute.
  */
 (function () {
+  // Marker so we can tell from outside whether this main-world script
+  // ever ran on a page. Useful when diagnosing CSP / world:MAIN drops on
+  // sites with strict CSPs (Google's `require-trusted-types-for 'script'`
+  // is the canonical case) — without this marker the only way to tell is
+  // observing prototype.play.toString() at runtime, which is racy.
+  try {
+    if (document && document.documentElement) {
+      document.documentElement.setAttribute('data-still-mwp', 'loaded');
+    }
+  } catch (e) {}
+
   const SETTLE_MS = 300;
   const svgSettleTimers = new WeakMap();
   const origSetAttribute = Element.prototype.setAttribute;
