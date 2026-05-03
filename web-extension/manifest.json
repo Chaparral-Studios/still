@@ -27,6 +27,11 @@
         "id": "ruleset_apng",
         "enabled": false,
         "path": "rules/ruleset_apng.json"
+      },
+      {
+        "id": "ruleset_ar_video",
+        "enabled": true,
+        "path": "rules/ruleset_ar_video.json"
       }
     ]
   },

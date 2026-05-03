@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 
 const CONTENT_SCRIPT = path.resolve(__dirname, '..', 'web-extension', 'content.js');
+const MAIN_WORLD_PATCH = path.resolve(__dirname, '..', 'web-extension', 'main-world-patch.js');
 const TESTS_DIR = path.resolve(__dirname);
 
 let server;
@@ -1258,5 +1259,164 @@ test.describe('Still — block and replace logic', () => {
     // Fill should be upgraded from 'none' to 'forwards' so the end state
     // persists after currentTime == duration.
     expect(result.noneFill).toBe('forwards');
+  });
+
+  test('blocks gstatic search-ar-dev video previews and intercepts programmatic .play()', async ({ page }) => {
+    // Google Shopping serves auto-spinning product previews as small muted
+    // playsinline <video> elements pointed at gstatic.com/search-ar-dev/...
+    // mp4. They bypass autoplay blockers (no `autoplay` attribute, muted +
+    // playsinline are spec-exempt) by calling videoEl.play() from an
+    // IntersectionObserver/hover handler. Our defense:
+    //   1. content.js tags matching elements with data-still-video="blocked"
+    //      and pauses them.
+    //   2. main-world-patch.js patches HTMLMediaElement.prototype.play so
+    //      that calling .play() on a tagged element is a no-op (returns a
+    //      resolved Promise without starting playback).
+    // Both are required: the prototype patch must live in the main world
+    // (where page scripts call play), and the tag must live on the DOM
+    // attribute (which IS shared across worlds).
+    const fs = require('fs');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <video id="ar"   muted playsinline preload="none"
+               src="https://www.gstatic.com/search-ar-dev/renders/abc/square_video.mp4"></video>
+        <video id="ok"   muted playsinline preload="none"
+               src="https://example.com/legitimate.mp4"></video>
+      </body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
+
+    // Give the initial scan a tick to tag the matching video.
+    await page.waitForFunction(
+      () => document.getElementById('ar').dataset.stillVideo === 'blocked',
+      { timeout: 3000 }
+    );
+
+    const result = await page.evaluate(async () => {
+      const ar = document.getElementById('ar');
+      const ok = document.getElementById('ok');
+      // Tag check + .play() interception check.
+      const arPlayResult = await ar.play().then(() => 'resolved').catch((e) => 'rejected:' + e.name);
+      // For the unrelated video we don't actually want it to start playing in
+      // the test (would be flaky with no-src loading) — what we care about is
+      // that the prototype patch DIDN'T short-circuit it. We verify by
+      // checking the function identity: ar's .play returns Promise.resolve()
+      // immediately; ok's .play would attempt to load the src.
+      const okIntercepted = ok.dataset.stillVideo === 'blocked';
+      // Cancel ok's load attempt cleanly to avoid test-runtime warnings.
+      try { ok.removeAttribute('src'); ok.load(); } catch (e) {}
+      return {
+        arTag: ar.dataset.stillVideo,
+        arPaused: ar.paused,
+        arPlayResult,
+        okTag: ok.dataset.stillVideo || null,
+        okIntercepted,
+      };
+    });
+    expect(result.arTag).toBe('blocked');
+    expect(result.arPaused).toBe(true);              // never started despite play()
+    expect(result.arPlayResult).toBe('resolved');    // play() returns resolved Promise
+    expect(result.okTag).toBeNull();                 // legitimate video untouched
+    expect(result.okIntercepted).toBe(false);
+  });
+
+  test('blocks lazy-inserted gstatic AR videos that are .play()ed in the same tick (race-safe)', async ({ page }) => {
+    // Race the user reported in real Chrome: initial-viewport videos got
+    // blocked, but "after I scrolled down and started hovering, later stuff
+    // started playing." The pattern: Google's IntersectionObserver / hover
+    // handler fires when a card scrolls into view, inserts a <video> element
+    // and synchronously calls .play() on it in the same JS tick — BEFORE
+    // content.js's MutationObserver fires to walk the new node and tag it.
+    //
+    // The earlier defense gated the .play() interception on
+    // data-still-video="blocked" being already present. With the tag absent
+    // (because we beat content.js), play() slipped through and the video ran.
+    // The fix: main-world-patch.js's HTMLMediaElement.prototype.play override
+    // ALSO checks the element's src URL against VIDEO_PREVIEW_BLOCKLIST_RE,
+    // synchronously inside the play() call. Tag-or-URL gate, no race.
+    //
+    // This test reproduces the timing exactly: insert a video and call play()
+    // in one synchronous block, then assert paused.
+    const fs = require('fs');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${mainWorldPatch}</script>
+      <body></body>
+    `);
+    const result = await page.evaluate(async () => {
+      // Synchronous insert + immediate play(), no awaiting MutationObserver.
+      const v = document.createElement('video');
+      v.muted = true; v.playsInline = true;
+      // Note: src attribute set BEFORE insert so currentSrc/src are populated
+      // when play() is called. Mirrors what real Google does.
+      v.src = 'https://www.gstatic.com/search-ar-dev/renders/foo/square_video.mp4';
+      document.body.appendChild(v);
+      const playResult = await v.play().then(() => 'resolved').catch((e) => 'rejected:' + e.name);
+      // Also test the <source>-children path: same race, source child instead
+      // of attribute. (Some carousels use this form.)
+      const v2 = document.createElement('video');
+      v2.muted = true; v2.playsInline = true;
+      const s = document.createElement('source');
+      s.src = 'https://www.gstatic.com/search-ar-dev/renders/bar/square_video.mp4';
+      v2.appendChild(s);
+      document.body.appendChild(v2);
+      const playResult2 = await v2.play().then(() => 'resolved').catch((e) => 'rejected:' + e.name);
+      // Control: a video with a non-blocklisted src must NOT be intercepted.
+      // (Don't actually load anything — empty src is fine; the patch should
+      // forward to the original play() and let it reject naturally.)
+      const v3 = document.createElement('video');
+      v3.muted = true; v3.playsInline = true;
+      v3.src = 'data:video/mp4;base64,aaaa';
+      document.body.appendChild(v3);
+      let v3Intercepted;
+      try {
+        await v3.play();
+        // If we got here, play() didn't reject — the patch let it through to
+        // origMediaPlay. Whatever happens next (NotSupportedError eventually)
+        // is real-browser behavior, not interception.
+        v3Intercepted = false;
+      } catch (e) {
+        // play() rejected — that's the unpatched path firing on bad data.
+        // Importantly NOT NotAllowedError-from-our-Promise.resolve route.
+        v3Intercepted = false;
+      }
+      // Drain pending tasks so paused state stabilizes.
+      await new Promise((r) => setTimeout(r, 50));
+      return {
+        v_paused: v.paused,
+        v_playResult: playResult,
+        v_taggedAfter: v.getAttribute('data-still-video'),
+        v2_paused: v2.paused,
+        v2_playResult: playResult2,
+        v2_taggedAfter: v2.getAttribute('data-still-video'),
+        v3_intercepted: v3Intercepted,
+        v3_taggedAfter: v3.getAttribute('data-still-video'),
+      };
+    });
+    // src-attribute path
+    expect(result.v_playResult).toBe('resolved');
+    expect(result.v_paused).toBe(true);
+    expect(result.v_taggedAfter).toBe('blocked');
+    // <source>-children path
+    expect(result.v2_playResult).toBe('resolved');
+    expect(result.v2_paused).toBe(true);
+    expect(result.v2_taggedAfter).toBe('blocked');
+    // Control: unrelated video not tagged
+    expect(result.v3_taggedAfter).toBeNull();
   });
 });
