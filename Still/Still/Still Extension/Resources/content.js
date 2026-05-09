@@ -63,13 +63,16 @@
     '  object-position: -9999px -9999px !important;',
     '}',
     // Inline video previews used as image substitutes (Google Shopping AR
-    // spin previews, e.g. `gstatic.com/search-ar-dev/...`) — hide once we've
-    // tagged them. visibility:hidden preserves layout so the sibling poster
-    // <img> in the same card stays in its slot. Pairs with blockVideoPreview()
-    // which pauses and neuters .play() so JS-driven hover/intersection
-    // handlers can't restart playback.
+    // spin previews, e.g. `gstatic.com/search-ar-dev/...`). display:none
+    // (not visibility:hidden) — Google's product cards position the video
+    // absolutely over the static poster <img>, so removing it from layout
+    // doesn't shift anything. visibility:hidden was leaking visible motion
+    // (user report 2026-05-09) — likely because the video element kept a
+    // composited layer that decoded frames even while "invisible". Pairs
+    // with blockVideoPreview() which pauses and neuters .play() so JS-
+    // driven hover/intersection handlers can't restart playback.
     'video[data-still-video="blocked"] {',
-    '  visibility: hidden !important;',
+    '  display: none !important;',
     '}'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
