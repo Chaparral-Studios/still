@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Still motion-test fixture: gstatic AR shopping spin previews</title>
+<style>
+  body { margin: 0; padding: 24px; background: #1a1a1a; color: #eee;
+         font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  h1   { margin: 0 0 12px; font-size: 18px; font-weight: 500; }
+  p    { margin: 0 0 18px; color: #aaa; }
+  .grid { display: grid; grid-template-columns: repeat(4, 159px);
+          gap: 16px; }
+  .card { background: #2a2a2a; padding: 8px; border-radius: 4px; }
+  /* These attributes match the Google Shopping AR-spin pattern verbatim:
+     muted+playsinline+aria-hidden+disableremoteplayback+preload=none, NO
+     `autoplay` attribute. Trigger script below calls .play() on each one,
+     simulating Google's IntersectionObserver/hover handler. */
+  video { width: 159px; height: 199px; background: #444; display: block; }
+  .label { font-size: 11px; color: #888; margin-top: 4px;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<h1>Mock Google Shopping AR-spin carousel</h1>
+<p>Fixture for the Still extension. The four videos below are the real
+mp4s that Google embeds in Shopping carousels (paths captured from prior
+diagnostic runs against live SERPs). Each &lt;video&gt; has the exact attribute
+set Google ships (no <code>autoplay</code> attribute, but
+<code>muted</code>+<code>playsinline</code>+<code>aria-hidden</code>+
+<code>disableremoteplayback</code>+<code>preload="none"</code>). The script
+below calls <code>play()</code> on every video after a 1.5 s delay,
+simulating the IntersectionObserver/hover trigger that ordinary autoplay
+blockers can't catch.</p>
+
+<div class="grid">
+  <div class="card">
+    <video id="v1" muted playsinline aria-hidden="true" disableremoteplayback preload="none"
+           src="https://www.gstatic.com/search-ar-dev/renders/7288397677794265388_ml/7834519064935726986_v5/square_video.mp4"></video>
+    <div class="label">v1 (square_video)</div>
+  </div>
+  <div class="card">
+    <video id="v2" muted playsinline aria-hidden="true" disableremoteplayback preload="none"
+           src="https://www.gstatic.com/search-ar-dev/renders/14970581154744047088_ml/9792256154545184134_v5/square_video.mp4"></video>
+    <div class="label">v2 (square_video)</div>
+  </div>
+  <div class="card">
+    <video id="v3" muted playsinline aria-hidden="true" disableremoteplayback preload="none"
+           src="https://www.gstatic.com/search-ar-dev/renders/9680629773273341113_ml/9831554337451611906_v5/square_video.mp4"></video>
+    <div class="label">v3 (square_video)</div>
+  </div>
+  <div class="card">
+    <video id="v4" muted playsinline aria-hidden="true" disableremoteplayback preload="none"
+           src="https://www.gstatic.com/search-ar-dev/renders/69f3e6342f0272c8/spin_square.mp4"></video>
+    <div class="label">v4 (spin_square)</div>
+  </div>
+</div>
+
+<script>
+  // Simulate Google's IntersectionObserver / hover-driven trigger.
+  // Loop forever — each video, when it ends, restart it. This makes motion
+  // continuous over the entire capture window so meanMotion is meaningful.
+  setTimeout(() => {
+    for (const v of document.querySelectorAll('video')) {
+      v.addEventListener('ended', () => v.play().catch(() => {}));
+      v.play().catch(() => {});
+    }
+  }, 1500);
+</script>
+</body>
+</html>

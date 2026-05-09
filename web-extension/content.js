@@ -61,6 +61,18 @@
     '  visibility: visible !important;',
     "  background: #e8e8e8 url(\"" + PLACEHOLDER + "\") center/contain no-repeat !important;",
     '  object-position: -9999px -9999px !important;',
+    '}',
+    // Inline video previews used as image substitutes (Google Shopping AR
+    // spin previews, e.g. `gstatic.com/search-ar-dev/...`). display:none
+    // (not visibility:hidden) — Google's product cards position the video
+    // absolutely over the static poster <img>, so removing it from layout
+    // doesn't shift anything. visibility:hidden was leaking visible motion
+    // (user report 2026-05-09) — likely because the video element kept a
+    // composited layer that decoded frames even while "invisible". Pairs
+    // with blockVideoPreview() which pauses and neuters .play() so JS-
+    // driven hover/intersection handlers can't restart playback.
+    'video[data-still-video="blocked"] {',
+    '  display: none !important;',
     '}'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
@@ -560,11 +572,48 @@
     });
   }
 
-  // --- Pause all videos ---
+  // --- Pause all videos + neuter image-substitute video previews ---
+
+  // URL patterns for inline videos used as animated-image substitutes —
+  // muted, playsinline, aria-hidden previews that ordinary autoplay blockers
+  // (Safari's built-in, StopTheMadness Pro) let through because there's no
+  // `autoplay` attribute and `muted+playsinline` is exempt under spec.
+  // First entry: Google Shopping's AR product spin previews on the SERP.
+  const VIDEO_PREVIEW_BLOCKLIST_RE = /\/\/[^/]*\.gstatic\.com\/search-ar-dev\//i;
+
+  function videoSrcs(v) {
+    const out = [];
+    if (v.currentSrc) out.push(v.currentSrc);
+    if (v.src) out.push(v.src);
+    v.querySelectorAll('source').forEach((s) => { if (s.src) out.push(s.src); });
+    return out;
+  }
+
+  function isVideoPreviewToBlock(v) {
+    return videoSrcs(v).some((s) => VIDEO_PREVIEW_BLOCKLIST_RE.test(s));
+  }
+
+  function blockVideoPreview(v) {
+    if (v.dataset.stillVideo === 'blocked') return;
+    v.dataset.stillVideo = 'blocked';
+    try { v.pause(); } catch (e) {}
+    try { v.removeAttribute('autoplay'); } catch (e) {}
+    // Override .play() on this specific element so JS-triggered playback
+    // (Google's IntersectionObserver / hover handlers) becomes a no-op.
+    // We resolve the returned Promise to keep callers from throwing.
+    try {
+      Object.defineProperty(v, 'play', {
+        value: function () { return Promise.resolve(); },
+        writable: false,
+        configurable: false,
+      });
+    } catch (e) {}
+  }
 
   function pauseVideos() {
     document.querySelectorAll('video').forEach((v) => {
       try { v.pause(); } catch (e) {}
+      if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
     });
   }
 
@@ -606,9 +655,13 @@
                 processImage(node);
               } else if (node.tagName === 'VIDEO') {
                 try { node.pause(); } catch (e) {}
+                if (isVideoPreviewToBlock(node)) blockVideoPreview(node);
               } else if (node.querySelectorAll) {
                 node.querySelectorAll('img').forEach(processImage);
-                node.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch (e) {} });
+                node.querySelectorAll('video').forEach((v) => {
+                  try { v.pause(); } catch (e) {}
+                  if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
+                });
                 // Check for SVG animations in added subtree
                 if (node.tagName === 'SVG' || node.querySelector?.('svg, animate, animateTransform, animateMotion, set')) {
                   killSVGAnimations();
@@ -645,6 +698,16 @@
               target.removeAttribute('srcset');
               target.removeAttribute('src');
             }
+          }
+          // Late-bound video src — Google sometimes inserts <video> first then
+          // assigns src as the carousel scrolls into view. Re-check on src
+          // change so we still catch the AR-shopping pattern.
+          if (target.tagName === 'VIDEO' && target.dataset.stillVideo !== 'blocked') {
+            if (isVideoPreviewToBlock(target)) blockVideoPreview(target);
+          }
+          if (target.tagName === 'SOURCE' && target.parentElement?.tagName === 'VIDEO') {
+            const v = target.parentElement;
+            if (v.dataset.stillVideo !== 'blocked' && isVideoPreviewToBlock(v)) blockVideoPreview(v);
           }
         }
       }
@@ -749,6 +812,7 @@
       isSpacer, isAnimatedDataGif,
       scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
       cancelAnimations,
+      isVideoPreviewToBlock, blockVideoPreview, pauseVideos,
     };
   }
 

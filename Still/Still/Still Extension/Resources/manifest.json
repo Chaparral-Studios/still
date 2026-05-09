@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Still",
-  "version": "1.3",
+  "version": "1.4",
   "description": "Block animated GIFs, WebP, and APNG. Pause autoplay video. Cancel CSS animations.",
   "permissions": [
     "activeTab",
@@ -27,6 +27,11 @@
         "id": "ruleset_apng",
         "enabled": false,
         "path": "rules/ruleset_apng.json"
+      },
+      {
+        "id": "ruleset_ar_video",
+        "enabled": true,
+        "path": "rules/ruleset_ar_video.json"
       }
     ]
   },
