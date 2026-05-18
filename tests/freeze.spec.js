@@ -856,6 +856,32 @@ test.describe('Still — block and replace logic', () => {
     expect(src).toMatch(/^data:image\/svg\+xml/); // replaced, not leaked
   });
 
+  test('STILL replaces a real GIF with width="1" height="1" HTML attrs (homedepot CSS-sizing pattern)', async ({ page }) => {
+    // homedepot.com renders <img width="1" height="1" class="sui-w-full sui-h-full">
+    // as a layout placeholder — utility CSS sizes the image to its container.
+    // Before the fix, isSpacer trusted the 1×1 HTML attrs alone and marked the
+    // 1814×504 Memorial Day hero GIF as static at document_start, before load.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-css-sized-hero';
+      img.setAttribute('width', '1');
+      img.setAttribute('height', '1');
+      img.style.width = '800px';
+      img.style.height = '200px';
+      img.src = base + '/fixtures/test-slow.gif';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForFunction(
+      () => document.getElementById('img-css-sized-hero').dataset.still === 'replaced',
+      { timeout: 3000 }
+    );
+    const src = await page.$eval('#img-css-sized-hero', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
   test('extensionless URL serving animated GIF: no visible-render window before block', async ({ page }) => {
     // Extensionless URLs (image CDNs that strip .gif/.webp, proxied images, etc.)
     // bypass our document_start CSS hide rule because the rule pattern-matches
