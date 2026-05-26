@@ -1360,6 +1360,135 @@ test.describe('Still — block and replace logic', () => {
     expect(result.okIntercepted).toBe(false);
   });
 
+  test('hides a canvas that draws via rAF (confetti / particle-bg pattern) and reveals a static one', async ({ page }) => {
+    // canvas-confetti (catdad/canvas-confetti) and similar particle libraries
+    // append a <canvas> and run an rAF loop that clearRect+fillRect every
+    // tick. They have no URL extension, no <img>, no <video>, no
+    // CSS-keyframe / Web Animations hook — the rest of our pipeline misses
+    // them entirely. The defense:
+    //   1. main-world-patch.js wraps CanvasRenderingContext2D and WebGL
+    //      draw methods; the first getContext call marks the canvas
+    //      data-still-canvas="probing".
+    //   2. content.js CSS hides every canvas that is not "static".
+    //   3. After 200 ms (or sooner, if ≥3 frames have already drawn), the
+    //      canvas is classified blocked (display:none + draws no-op) or
+    //      static (revealed).
+    const fs = require('fs');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); }, getURL(p){ return ''; } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <canvas id="anim" width="200" height="200"></canvas>
+        <canvas id="static" width="200" height="200"></canvas>
+        <script>
+          // Animated canvas — clear + fill every rAF tick, indefinitely.
+          (function () {
+            const c = document.getElementById('anim');
+            const ctx = c.getContext('2d');
+            (function tick() {
+              ctx.clearRect(0, 0, 200, 200);
+              ctx.fillStyle = 'red';
+              ctx.fillRect(Math.random() * 180, Math.random() * 180, 20, 20);
+              requestAnimationFrame(tick);
+            })();
+          })();
+          // Static canvas — one draw, no rAF loop.
+          (function () {
+            const c = document.getElementById('static');
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = 'blue';
+            ctx.fillRect(0, 0, 200, 200);
+          })();
+        </script>
+      </body>
+    `);
+    // Wait past the 200ms probe window plus margin.
+    await page.waitForTimeout(500);
+
+    const result = await page.evaluate(() => {
+      const a = document.getElementById('anim');
+      const s = document.getElementById('static');
+      return {
+        animState: a.getAttribute('data-still-canvas'),
+        animDisplay: getComputedStyle(a).display,
+        animVisibility: getComputedStyle(a).visibility,
+        staticState: s.getAttribute('data-still-canvas'),
+        staticVisibility: getComputedStyle(s).visibility,
+      };
+    });
+    expect(result.animState).toBe('blocked');
+    expect(result.animDisplay).toBe('none');
+    expect(result.staticState).toBe('static');
+    expect(result.staticVisibility).toBe('visible');
+  });
+
+  test('canvas animation never paints a single visible frame (pixel sampler)', async ({ page }) => {
+    // The above test proves the END-STATE is correct. This one proves NO
+    // FRAMES leak through during the probe window. rAF sampler records the
+    // canvas's computed visibility/display every paint; we assert no sample
+    // ever shows the canvas painted (animated AND visible) before block.
+    const fs = require('fs');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); }, getURL(p){ return ''; } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <canvas id="c" width="200" height="200"></canvas>
+        <script>
+          window.__samples = [];
+          (function () {
+            const c = document.getElementById('c');
+            const ctx = c.getContext('2d');
+            (function tick() {
+              ctx.clearRect(0, 0, 200, 200);
+              ctx.fillStyle = 'red';
+              ctx.fillRect(Math.random() * 180, Math.random() * 180, 20, 20);
+              const cs = getComputedStyle(c);
+              window.__samples.push({
+                t: performance.now(),
+                visibility: cs.visibility,
+                display: cs.display,
+                state: c.getAttribute('data-still-canvas'),
+              });
+              requestAnimationFrame(tick);
+            })();
+          })();
+        </script>
+      </body>
+    `);
+    await page.waitForTimeout(500);
+    const samples = await page.evaluate(() => window.__samples);
+    expect(samples.length).toBeGreaterThan(3);
+    // Every sample must be either visibility:hidden OR display:none.
+    // visibility:visible AND display!=none would mean the canvas was on
+    // screen with newly-drawn pixels — exactly what we can't let through.
+    const leaks = samples.filter((s) => s.visibility === 'visible' && s.display !== 'none');
+    expect(leaks).toEqual([]);
+  });
+
   test('blocks lazy-inserted gstatic AR videos that are .play()ed in the same tick (race-safe)', async ({ page }) => {
     // Race the user reported in real Chrome: initial-viewport videos got
     // blocked, but "after I scrolled down and started hovering, later stuff

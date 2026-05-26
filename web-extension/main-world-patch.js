@@ -156,4 +156,104 @@
     }
     return origMediaPlay.apply(this, arguments);
   };
+
+  // --- Canvas animation detector ---
+  // Decorative canvas animations (confetti, particle backgrounds, WebGL
+  // hero scenes) draw new pixels every rAF tick. URL rules can't catch
+  // them, image scanning can't see canvas pixels, getAnimations() doesn't
+  // know about them, and there's no <video>/<img> hook. The defining
+  // invariant: they keep drawing.
+  //
+  // Migraine-safety constraint: never show even a single animated frame.
+  // So we mirror the .gif "probing" pattern — every canvas is hidden by
+  // default (CSS rule in content.js: `canvas:not([data-still-canvas="static"])
+  // { visibility: hidden !important }`), and we classify each one within
+  // a short probe window:
+  //   - probing: hidden, count frames
+  //   - threshold reached → blocked: display:none, no-op subsequent draws
+  //   - probe window expires under threshold → static: revealed
+  //
+  // Interactive canvases (maps, charts, games) typically render 1–2 frames
+  // at setup and then idle until user input, so they classify as static and
+  // are free to redraw under interaction without retriggering us.
+  const PROBE_WINDOW_MS = 200;
+  const FRAME_THRESHOLD = 3;
+  const SAME_FRAME_DEBOUNCE_MS = 5;
+  const canvasStats = new WeakMap();
+
+  function classify(canvas) {
+    if (!canvas || canvas.getAttribute('data-still-canvas') !== 'probing') return;
+    const s = canvasStats.get(canvas);
+    const frames = s ? s.frames : 0;
+    try {
+      canvas.setAttribute('data-still-canvas', frames >= FRAME_THRESHOLD ? 'blocked' : 'static');
+    } catch (e) {}
+  }
+
+  function instrumentCanvas(canvas) {
+    if (!canvas || canvas.getAttribute('data-still-canvas')) return;
+    try { canvas.setAttribute('data-still-canvas', 'probing'); } catch (e) {}
+    canvasStats.set(canvas, { last: 0, frames: 0 });
+    setTimeout(() => classify(canvas), PROBE_WINDOW_MS);
+  }
+
+  function recordDraw(canvas) {
+    if (!canvas) return false;
+    const state = canvas.getAttribute('data-still-canvas');
+    if (state === 'blocked') return true; // signal: skip the draw entirely
+    if (!state) instrumentCanvas(canvas);
+    else if (state !== 'probing') return false; // static — leave it alone
+    const s = canvasStats.get(canvas);
+    if (!s) return false;
+    const now = performance.now();
+    if (now - s.last < SAME_FRAME_DEBOUNCE_MS) return false;
+    s.last = now;
+    s.frames++;
+    // Cross threshold mid-probe → block immediately, no point waiting for
+    // the timer.
+    if (s.frames >= FRAME_THRESHOLD) {
+      try { canvas.setAttribute('data-still-canvas', 'blocked'); } catch (e) {}
+      return true;
+    }
+    return false;
+  }
+
+  // getContext is the universal entry-point — every canvas that draws goes
+  // through it. Instrumenting here means we mark "probing" the instant a
+  // page touches a canvas, before the first draw call lands.
+  const origGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function () {
+    instrumentCanvas(this);
+    return origGetContext.apply(this, arguments);
+  };
+
+  function patchDrawMethods(proto, methods) {
+    if (!proto) return;
+    methods.forEach((m) => {
+      const orig = proto[m];
+      if (typeof orig !== 'function') return;
+      proto[m] = function () {
+        const skip = recordDraw(this && this.canvas);
+        if (skip) return; // blocked: no-op (saves CPU on the rAF loop)
+        return orig.apply(this, arguments);
+      };
+    });
+  }
+
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    patchDrawMethods(CanvasRenderingContext2D.prototype, [
+      'clearRect', 'fillRect', 'strokeRect',
+      'drawImage', 'fill', 'stroke',
+      'fillText', 'strokeText', 'putImageData',
+    ]);
+  }
+  if (typeof WebGLRenderingContext !== 'undefined') {
+    patchDrawMethods(WebGLRenderingContext.prototype, ['drawArrays', 'drawElements']);
+  }
+  if (typeof WebGL2RenderingContext !== 'undefined') {
+    patchDrawMethods(WebGL2RenderingContext.prototype, [
+      'drawArrays', 'drawElements',
+      'drawArraysInstanced', 'drawElementsInstanced',
+    ]);
+  }
 })();

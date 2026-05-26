@@ -73,6 +73,27 @@
     // driven hover/intersection handlers can't restart playback.
     'video[data-still-video="blocked"] {',
     '  display: none !important;',
+    '}',
+    // Canvas animation detector (main-world-patch.js).
+    //
+    // We hide EVERY canvas by default until the detector classifies it,
+    // because a migraine-safe extension can't afford to show even one
+    // frame of a fast-paint animation. Classification happens within
+    // ~200 ms of the page first touching the canvas (its getContext call):
+    //   - probing  → still measuring; stay hidden (visibility:hidden so
+    //                layout is preserved for legitimate charts/maps).
+    //   - blocked  → ≥3 frames drawn in the probe window; this is an
+    //                rAF-driven animation. display:none + draw no-ops in
+    //                the main-world patch save the rAF loop's work too.
+    //   - static   → drew ≤2 frames; safe to reveal.
+    // Selector form `canvas:not([data-still-canvas="static"])` covers both
+    // unclassified canvases (the brief moment between page parse and
+    // getContext) and "probing" canvases with one rule.
+    'canvas:not([data-still-canvas="static"]) {',
+    '  visibility: hidden !important;',
+    '}',
+    'canvas[data-still-canvas="blocked"] {',
+    '  display: none !important;',
     '}'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
