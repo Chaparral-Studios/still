@@ -856,6 +856,32 @@ test.describe('Still — block and replace logic', () => {
     expect(src).toMatch(/^data:image\/svg\+xml/); // replaced, not leaked
   });
 
+  test('STILL replaces a real GIF with width="1" height="1" HTML attrs (homedepot CSS-sizing pattern)', async ({ page }) => {
+    // homedepot.com renders <img width="1" height="1" class="sui-w-full sui-h-full">
+    // as a layout placeholder — utility CSS sizes the image to its container.
+    // Before the fix, isSpacer trusted the 1×1 HTML attrs alone and marked the
+    // 1814×504 Memorial Day hero GIF as static at document_start, before load.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-css-sized-hero';
+      img.setAttribute('width', '1');
+      img.setAttribute('height', '1');
+      img.style.width = '800px';
+      img.style.height = '200px';
+      img.src = base + '/fixtures/test-slow.gif';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForFunction(
+      () => document.getElementById('img-css-sized-hero').dataset.still === 'replaced',
+      { timeout: 3000 }
+    );
+    const src = await page.$eval('#img-css-sized-hero', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
   test('extensionless URL serving animated GIF: no visible-render window before block', async ({ page }) => {
     // Extensionless URLs (image CDNs that strip .gif/.webp, proxied images, etc.)
     // bypass our document_start CSS hide rule because the rule pattern-matches
@@ -1332,6 +1358,135 @@ test.describe('Still — block and replace logic', () => {
     expect(result.arPlayResult).toBe('resolved');    // play() returns resolved Promise
     expect(result.okTag).toBeNull();                 // legitimate video untouched
     expect(result.okIntercepted).toBe(false);
+  });
+
+  test('hides a canvas that draws via rAF (confetti / particle-bg pattern) and reveals a static one', async ({ page }) => {
+    // canvas-confetti (catdad/canvas-confetti) and similar particle libraries
+    // append a <canvas> and run an rAF loop that clearRect+fillRect every
+    // tick. They have no URL extension, no <img>, no <video>, no
+    // CSS-keyframe / Web Animations hook — the rest of our pipeline misses
+    // them entirely. The defense:
+    //   1. main-world-patch.js wraps CanvasRenderingContext2D and WebGL
+    //      draw methods; the first getContext call marks the canvas
+    //      data-still-canvas="probing".
+    //   2. content.js CSS hides every canvas that is not "static".
+    //   3. After 200 ms (or sooner, if ≥3 frames have already drawn), the
+    //      canvas is classified blocked (display:none + draws no-op) or
+    //      static (revealed).
+    const fs = require('fs');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); }, getURL(p){ return ''; } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <canvas id="anim" width="200" height="200"></canvas>
+        <canvas id="static" width="200" height="200"></canvas>
+        <script>
+          // Animated canvas — clear + fill every rAF tick, indefinitely.
+          (function () {
+            const c = document.getElementById('anim');
+            const ctx = c.getContext('2d');
+            (function tick() {
+              ctx.clearRect(0, 0, 200, 200);
+              ctx.fillStyle = 'red';
+              ctx.fillRect(Math.random() * 180, Math.random() * 180, 20, 20);
+              requestAnimationFrame(tick);
+            })();
+          })();
+          // Static canvas — one draw, no rAF loop.
+          (function () {
+            const c = document.getElementById('static');
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = 'blue';
+            ctx.fillRect(0, 0, 200, 200);
+          })();
+        </script>
+      </body>
+    `);
+    // Wait past the 200ms probe window plus margin.
+    await page.waitForTimeout(500);
+
+    const result = await page.evaluate(() => {
+      const a = document.getElementById('anim');
+      const s = document.getElementById('static');
+      return {
+        animState: a.getAttribute('data-still-canvas'),
+        animDisplay: getComputedStyle(a).display,
+        animVisibility: getComputedStyle(a).visibility,
+        staticState: s.getAttribute('data-still-canvas'),
+        staticVisibility: getComputedStyle(s).visibility,
+      };
+    });
+    expect(result.animState).toBe('blocked');
+    expect(result.animDisplay).toBe('none');
+    expect(result.staticState).toBe('static');
+    expect(result.staticVisibility).toBe('visible');
+  });
+
+  test('canvas animation never paints a single visible frame (pixel sampler)', async ({ page }) => {
+    // The above test proves the END-STATE is correct. This one proves NO
+    // FRAMES leak through during the probe window. rAF sampler records the
+    // canvas's computed visibility/display every paint; we assert no sample
+    // ever shows the canvas painted (animated AND visible) before block.
+    const fs = require('fs');
+    const mainWorldPatch = fs.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); }, getURL(p){ return ''; } },
+        };
+      </script>
+      <script>${mainWorldPatch}</script>
+      <script>${contentJs}</script>
+      <body>
+        <canvas id="c" width="200" height="200"></canvas>
+        <script>
+          window.__samples = [];
+          (function () {
+            const c = document.getElementById('c');
+            const ctx = c.getContext('2d');
+            (function tick() {
+              ctx.clearRect(0, 0, 200, 200);
+              ctx.fillStyle = 'red';
+              ctx.fillRect(Math.random() * 180, Math.random() * 180, 20, 20);
+              const cs = getComputedStyle(c);
+              window.__samples.push({
+                t: performance.now(),
+                visibility: cs.visibility,
+                display: cs.display,
+                state: c.getAttribute('data-still-canvas'),
+              });
+              requestAnimationFrame(tick);
+            })();
+          })();
+        </script>
+      </body>
+    `);
+    await page.waitForTimeout(500);
+    const samples = await page.evaluate(() => window.__samples);
+    expect(samples.length).toBeGreaterThan(3);
+    // Every sample must be either visibility:hidden OR display:none.
+    // visibility:visible AND display!=none would mean the canvas was on
+    // screen with newly-drawn pixels — exactly what we can't let through.
+    const leaks = samples.filter((s) => s.visibility === 'visible' && s.display !== 'none');
+    expect(leaks).toEqual([]);
   });
 
   test('blocks lazy-inserted gstatic AR videos that are .play()ed in the same tick (race-safe)', async ({ page }) => {

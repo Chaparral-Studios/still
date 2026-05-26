@@ -73,6 +73,27 @@
     // driven hover/intersection handlers can't restart playback.
     'video[data-still-video="blocked"] {',
     '  display: none !important;',
+    '}',
+    // Canvas animation detector (main-world-patch.js).
+    //
+    // We hide EVERY canvas by default until the detector classifies it,
+    // because a migraine-safe extension can't afford to show even one
+    // frame of a fast-paint animation. Classification happens within
+    // ~200 ms of the page first touching the canvas (its getContext call):
+    //   - probing  → still measuring; stay hidden (visibility:hidden so
+    //                layout is preserved for legitimate charts/maps).
+    //   - blocked  → ≥3 frames drawn in the probe window; this is an
+    //                rAF-driven animation. display:none + draw no-ops in
+    //                the main-world patch save the rAF loop's work too.
+    //   - static   → drew ≤2 frames; safe to reveal.
+    // Selector form `canvas:not([data-still-canvas="static"])` covers both
+    // unclassified canvases (the brief moment between page parse and
+    // getContext) and "probing" canvases with one rule.
+    'canvas:not([data-still-canvas="static"]) {',
+    '  visibility: hidden !important;',
+    '}',
+    'canvas[data-still-canvas="blocked"] {',
+    '  display: none !important;',
     '}'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
@@ -384,13 +405,20 @@
     // let a real animated GIF leak through after a lazy-load swap from a
     // 1×1 placeholder (whose nw/nh briefly remain as 1×1).
     if (img.complete && nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
-    // Check HTML attributes (width="1" height="1")
+    // HTML width="1" height="1" attrs. Only trust alongside natural-dim
+    // confirmation: homedepot.com sets width="1" height="1" on real `<img>`
+    // elements that CSS (`sui-w-full sui-h-full`) sizes to the container,
+    // so the attrs are a layout placeholder, not a 1×1 spacer. Without
+    // natural-dim corroboration we'd mark a 1814×504 animated hero static.
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
-    if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0) return true;
-    // Check if the element is invisible (zero layout size) — but only if
-    // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
-    if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
+    if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0 &&
+        img.complete && nw > 0 && nh > 0 && nw <= 4 && nh <= 4) return true;
+    // Zero layout size + tiny natural — collapsed-parent genuine spacer.
+    // Don't catch large-natural images in collapsed parents: those are
+    // real images temporarily hidden by their layout chain, not spacers.
+    if (img.offsetWidth === 0 && img.offsetHeight === 0 &&
+        nw > 0 && nh > 0 && nw <= 4 && nh <= 4) return true;
     // Filename hints — classic spacer names (1x1.trans.gif, blank.gif, etc.).
     // Narrow match: spacer keyword must be the filename basename, not a prefix.
     const src = img.currentSrc || img.src || '';

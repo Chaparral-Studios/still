@@ -3,6 +3,7 @@ Still blocks animated images and motion effects in Safari, giving you a calm, st
 What it blocks:
 • Animated GIFs — replaced with a static placeholder. Includes GIFs served via image-proxy URLs (Next.js, Cloudinary) and cross-origin CDNs that often slip past simpler blockers
 • Animated WebP and APNG — detected by inspecting file headers; static images display normally
+• Inline video product previews used as animated-image substitutes — Google Shopping's spinning 3D product cards and similar muted, autoplaying clips that bypass Safari's autoplay control
 • CSS transitions that create subliminal smooth motion (carousel crossfades, opacity pulses, sliding banners)
 • CSS background-image animations
 • SVG animations

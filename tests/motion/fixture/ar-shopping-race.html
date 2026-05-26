@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Still motion-test fixture: race-condition AR videos</title>
+<style>
+  body { margin: 0; padding: 24px; background: #1a1a1a; color: #eee;
+         font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  h1   { margin: 0 0 12px; font-size: 18px; font-weight: 500; }
+  p    { margin: 0 0 18px; color: #aaa; }
+  .grid { display: grid; grid-template-columns: repeat(4, 159px);
+          gap: 16px; min-height: 220px; }
+  .card { background: #2a2a2a; padding: 8px; border-radius: 4px;
+          width: 159px; height: 215px; }
+  video { width: 159px; height: 199px; background: #444; display: block; }
+  .label { font-size: 11px; color: #888; margin-top: 4px;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<h1>Race-condition fixture: lazy-inserted AR videos</h1>
+<p>Reproduces the race that real Google Shopping hit: a card scrolls into
+view (or you hover), Google's JS inserts a &lt;video&gt; element AND
+synchronously calls <code>.play()</code> on it in the same tick — before
+the extension's MutationObserver has a chance to tag it. The earlier
+defense (gated only on the data-still-video attribute) leaked here. The
+race-safe defense (gates on the src URL too, synchronously inside the
+play() override) catches it.</p>
+
+<div id="slot" class="grid"></div>
+
+<script>
+  // Real gstatic AR mp4 URLs harvested from prior live-SERP captures.
+  const URLS = [
+    'https://www.gstatic.com/search-ar-dev/renders/7288397677794265388_ml/7834519064935726986_v5/square_video.mp4',
+    'https://www.gstatic.com/search-ar-dev/renders/14970581154744047088_ml/9792256154545184134_v5/square_video.mp4',
+    'https://www.gstatic.com/search-ar-dev/renders/9680629773273341113_ml/9831554337451611906_v5/square_video.mp4',
+    'https://www.gstatic.com/search-ar-dev/renders/69f3e6342f0272c8/spin_square.mp4',
+  ];
+
+  // Wait 2s, then create + insert + play() each video in one synchronous
+  // block per video. This is the exact pattern Google's IntersectionObserver
+  // uses. Each loop iteration runs to completion before the microtask queue
+  // drains — so the extension's MutationObserver doesn't run until AFTER
+  // .play() has already been called on the new element.
+  setTimeout(() => {
+    const slot = document.getElementById('slot');
+    URLS.forEach((url, i) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const v = document.createElement('video');
+      v.muted = true;
+      v.playsInline = true;
+      v.setAttribute('preload', 'none');
+      v.setAttribute('aria-hidden', 'true');
+      v.setAttribute('disableremoteplayback', '');
+      v.src = url;
+      card.appendChild(v);
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = 'race-' + (i + 1);
+      card.appendChild(label);
+      slot.appendChild(card);
+      // SYNCHRONOUS .play() in the same tick as insertion — no microtask
+      // boundary here. This is what content.js's MutationObserver loses
+      // the race against.
+      v.play().catch(() => {});
+      // Also re-trigger on end to keep the recording window full of motion.
+      v.addEventListener('ended', () => v.play().catch(() => {}));
+    });
+  }, 2000);
+</script>
+</body>
+</html>
