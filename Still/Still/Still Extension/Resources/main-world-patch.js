@@ -154,6 +154,17 @@
       } catch (e) {}
       return Promise.resolve();
     }
+    // Record user-initiated playback so the content script's re-pause pass
+    // leaves this video alone (it re-pauses autoplaying videos on every scan;
+    // without this mark it kept pausing YouTube mid-watch).
+    // userActivation.isActive is the TRANSIENT bit — true only briefly after
+    // a real gesture — so script-driven autoplay retries don't qualify.
+    try {
+      if (typeof navigator !== 'undefined' && navigator.userActivation &&
+          navigator.userActivation.isActive && this.setAttribute) {
+        this.setAttribute('data-still-user-play', '');
+      }
+    } catch (e) {}
     return origMediaPlay.apply(this, arguments);
   };
 })();

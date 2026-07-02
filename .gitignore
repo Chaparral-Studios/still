@@ -15,3 +15,6 @@ tests/motion/cookies/
 
 # Claude Code local state
 .claude/
+
+# Browser-generated declarativeNetRequest indexed rulesets
+web-extension/_metadata/
