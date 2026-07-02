@@ -252,10 +252,56 @@
 
   // --- Replace image with placeholder ---
 
+  function freezeDimensions(img) {
+    // Pin the layout box BEFORE swapping src: the placeholder SVG is 100×100
+    // intrinsic, so an intrinsically-sized image would reflow (e.g. a
+    // 1814×504 hero collapsing to 100×100) and everything below it jumps —
+    // masonry grids re-layout under the user mid-scroll (measured on
+    // giphy.com; scroll "page jumps" are a reported migraine trigger).
+    // width/height attrs are presentational hints: they pin intrinsically-
+    // sized images but lose to any page CSS, so responsive layouts keep
+    // control.
+    if (img.getAttribute('width') || img.getAttribute('height')) return;
+    let w = img.offsetWidth;
+    let h = img.offsetHeight;
+    if (!(w > 0 && h > 0)) {
+      // Not laid out (display:none subtree etc.) — fall back to the
+      // original resource's intrinsic size, captured before the swap.
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+    }
+    if (w > 0 && h > 0) {
+      try {
+        img.setAttribute('width', String(w));
+        img.setAttribute('height', String(h));
+      } catch (e) {}
+    }
+  }
+
+  // Verdicts arrive one probe at a time, so applying each instantly makes
+  // tiles pop in one-by-one during scroll (measured on giphy.com: roughly
+  // one tile per frame dribbling in over ~750ms after each scroll step).
+  // Queue hidden→visible state flips and flush them together so a batch
+  // appears in a single paint. Only used for images that are currently
+  // HIDDEN (probing) — delaying those is fail-safe. Never used for the
+  // fail-open Path B2, where a delay would extend visible animation.
+  const revealQueue = [];
+  let revealTimer = null;
+  function queueReveal(fn) {
+    revealQueue.push(fn);
+    if (revealTimer) return;
+    revealTimer = setTimeout(() => {
+      revealTimer = null;
+      const q = revealQueue.splice(0);
+      for (const f of q) { try { f(); } catch (e) {} }
+    }, 120);
+  }
+
   function replaceWithPlaceholder(img) {
     const originalSrc = img.currentSrc || img.src;
     replacedURLs.add(originalSrc);
 
+    freezeDimensions(img);
     clearPictureSources(img);
     if (img.srcset) img.srcset = '';
     img.src = PLACEHOLDER;
@@ -341,6 +387,45 @@
     return false;
   }
 
+  // Read at most `limit` bytes of a response body. We ask for
+  // `Range: bytes=0-4095`, but many CDNs ignore Range and return 200 with
+  // the FULL body — `res.arrayBuffer()` would then buffer the entire file,
+  // double-downloading every probed image (the probe races the renderer's
+  // own fetch). Stream just the prefix and cancel.
+  function readFirstBytes(res, limit) {
+    if (res.status === 206 || !res.body || typeof res.body.getReader !== 'function') {
+      return res.arrayBuffer().then((buf) => new Uint8Array(buf));
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    const concat = () => {
+      // Hard-cap at `limit`: a single read() chunk can carry the whole body
+      // (fast/local origins), and scanning past the requested window would
+      // make classification depend on network chunking.
+      const out = new Uint8Array(Math.min(total, limit));
+      let o = 0;
+      for (const c of chunks) {
+        const room = out.length - o;
+        if (room <= 0) break;
+        out.set(room >= c.length ? c : c.subarray(0, room), o);
+        o += Math.min(c.length, room);
+      }
+      return out;
+    };
+    const pump = () => reader.read().then(({ done, value }) => {
+      if (done) return concat();
+      chunks.push(value);
+      total += value.length;
+      if (total >= limit) {
+        reader.cancel().catch(() => {});
+        return concat();
+      }
+      return pump();
+    });
+    return pump();
+  }
+
   // --- Per-URL probe memoization ---
   // Pages repeat the same asset across many <img> elements (product grids,
   // avatars, emoji). Probing each element separately costs a network
@@ -373,9 +458,8 @@
       credentials: 'omit',
       headers: { 'Range': 'bytes=0-4095' }
     })
-      .then((res) => res.arrayBuffer())
-      .then((buf) => {
-        const bytes = new Uint8Array(buf);
+      .then((res) => readFirstBytes(res, 4096))
+      .then((bytes) => {
         if (u.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
         if (u.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
         // Check both if unclear
@@ -408,9 +492,8 @@
     return memoProbe('op:', url, (u) => {
       if (/\.svg(\?|$)/i.test(u)) return checkSVGAnimated(u);
       return fetch(u, { credentials: 'omit', headers: { 'Range': 'bytes=0-4095' } })
-        .then((res) => res.arrayBuffer())
-        .then((buf) => {
-          const bytes = new Uint8Array(buf);
+        .then((res) => readFirstBytes(res, 4096))
+        .then((bytes) => {
           if (/\.avif(\?|$)/i.test(u)) return isAnimatedAVIFBuffer(bytes);
           return isAnimatedPNGBuffer(bytes);
         })
@@ -471,9 +554,8 @@
           credentials: 'omit',
           headers: { 'Range': 'bytes=0-4095' }
         })
-          .then((res2) => res2.arrayBuffer())
-          .then((buf) => {
-            const bytes = new Uint8Array(buf);
+          .then((res2) => readFirstBytes(res2, 4096))
+          .then((bytes) => {
             return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes) ||
                     isAnimatedAVIFBuffer(bytes)) ? 'animated' : 'static';
           })
@@ -595,7 +677,10 @@
             replaceWithPlaceholder(img);
           }
         };
-        img.addEventListener('load', settle, { once: true });
+        // Batch the reveal: the img is hidden during the probe, so deferring
+        // the state flip by one flush window is fail-safe, and grouped flips
+        // stop the one-tile-per-frame dribble on grid pages.
+        img.addEventListener('load', () => queueReveal(settle), { once: true });
         // If the image fails to load (broken URL), unhide rather than leave
         // the viewport empty. It'll be re-checked if src changes.
         img.addEventListener('error', () => {
@@ -670,8 +755,10 @@
       if (img.dataset.still === 'probing' || img.dataset.still === 'static') return;
       img.dataset.still = 'probing';
 
-      checkAnimationByPartialFetch(src).then((animated) => {
+      checkAnimationByPartialFetch(src).then((animated) => queueReveal(() => {
         // src swapped mid-probe — re-dispatch against the new resource.
+        // (Checked at flush time, inside the queued closure, so the batch
+        // delay can't reintroduce the stale-verdict race.)
         if ((img.currentSrc || img.src) !== src) {
           img.dataset.still = '';
           processImage(img);
@@ -682,7 +769,7 @@
         } else {
           img.dataset.still = 'static';
         }
-      });
+      }));
       return;
     }
 
@@ -692,11 +779,12 @@
       img.dataset.still = 'probing';
       img.style.visibility = 'hidden';
 
-      const apply = (result) => {
+      const apply = (result) => queueReveal(() => {
         // src swapped mid-probe (lazy-load placeholder → real image). The
         // old URL's verdict must not be applied: it could replace a now-
         // static image or, worse, mark data-still="static" (visible
         // !important) while the element now shows an animated GIF.
+        // (Checked at flush time, inside the queued closure.)
         if ((img.currentSrc || img.src) !== src) {
           img.dataset.still = '';
           img.style.visibility = '';
@@ -711,7 +799,7 @@
           img.dataset.still = 'static';
           img.style.visibility = '';
         }
-      };
+      });
 
       detectAnimationForExtensionless(src).then((result) => {
         if (result !== 'unknown') {
@@ -769,7 +857,16 @@
     for (const el of candidates) {
       if (bgChecked.has(el)) continue;
       const bg = getComputedStyle(el).backgroundImage;
-      if (!bg || bg === 'none') continue;
+      if (!bg || bg === 'none') {
+        // Negative-cache, but only once the page has fully loaded: caching
+        // "no background" while stylesheets are still arriving would
+        // permanently skip an element whose gif background applies late.
+        // Without this cache, every mutation-triggered scan re-ran
+        // getComputedStyle (a forced style resolution) on nearly every
+        // element on the page — the dominant scan cost on large pages.
+        if (document.readyState === 'complete') bgChecked.add(el);
+        continue;
+      }
       bgChecked.add(el);
       // Check if any url() in the background-image points to a GIF
       if (/url\(["']?[^"')]*\.gif(\?[^"')]*)?["']?\)/i.test(bg)) {
