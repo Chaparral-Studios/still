@@ -5,7 +5,7 @@
 import { chromium as rawChromium, type Cookie, type Response } from '@playwright/test';
 import { addExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { mkdirSync, existsSync, renameSync, readdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, renameSync, readdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const chromium = addExtra(rawChromium);
@@ -92,6 +92,10 @@ if (cookiesFile && existsSync(cookiesFile)) {
 const page = await context.newPage();
 // Video timeline starts at newPage(). Anchor scroll timestamps here.
 const tVideoStart = Date.now();
+// recordVideo records EVERY page in the persistent context — including the
+// initial about:blank page the context opens before newPage(). Grab a handle
+// to OUR page's video now, so the rename below can't pick the blank one.
+const pageVideo = page.video();
 
 // Give the extension's service worker a moment to spin up.
 if (extDir) await page.waitForTimeout(1500);
@@ -175,10 +179,19 @@ await context.close();
 if (pngCapture) {
   console.log('wrote', join(outDir, 'frames'));
 } else {
-  // Playwright names the video with a random id; rename to recording.webm.
-  const files = readdirSync(outDir).filter((f) => f.endsWith('.webm'));
-  if (files.length) {
-    renameSync(join(outDir, files[0]), join(outDir, 'recording.webm'));
+  // Playwright names the video with a random id; rename OUR page's video to
+  // recording.webm. Never glob-and-take-first: the context's initial
+  // about:blank page produces a webm too, and taking files[0] made the
+  // analyzed video a filename lottery (a blank/white video analyzed as
+  // "movingFrames 0%" reads as a perfect block when nothing was measured).
+  const videoPath = pageVideo ? await pageVideo.path().catch(() => null) : null;
+  if (videoPath) {
+    renameSync(videoPath, join(outDir, 'recording.webm'));
+    // Remove stray videos of other pages (initial blank page) so nobody
+    // analyzes them by accident.
+    for (const f of readdirSync(outDir).filter((f) => f.endsWith('.webm') && f !== 'recording.webm')) {
+      rmSync(join(outDir, f));
+    }
     console.log('wrote', join(outDir, 'recording.webm'));
   } else {
     console.error('no video produced');
