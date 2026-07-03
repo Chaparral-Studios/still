@@ -21,7 +21,6 @@
 		FCB0DD062F71B5C10041FA5D /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DCFD2F71B5C10041FA5D /* popup.js */; };
 		FCB0DD072F71B5C10041FA5D /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DCFE2F71B5C10041FA5D /* background.js */; };
 		FCB0DD082F71B5C10041FA5D /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DCFF2F71B5C10041FA5D /* popup.html */; };
-		FCB0DD092F71B5C10041FA5D /* _metadata in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DD002F71B5C10041FA5D /* _metadata */; };
 		FCB0DD0A2F71B5C10041FA5D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DD012F71B5C10041FA5D /* icons */; };
 		FCB0DD0B2F71B5C10041FA5D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DD022F71B5C10041FA5D /* manifest.json */; };
 		FCB0DD0C2F71B5C10041FA5D /* rules in Resources */ = {isa = PBXBuildFile; fileRef = FCB0DD032F71B5C10041FA5D /* rules */; };
@@ -71,7 +70,6 @@
 		FCB0DCFD2F71B5C10041FA5D /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = "../../../web-extension/popup.js"; sourceTree = "<group>"; };
 		FCB0DCFE2F71B5C10041FA5D /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = "../../../web-extension/background.js"; sourceTree = "<group>"; };
 		FCB0DCFF2F71B5C10041FA5D /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = "../../../web-extension/popup.html"; sourceTree = "<group>"; };
-		FCB0DD002F71B5C10041FA5D /* _metadata */ = {isa = PBXFileReference; lastKnownFileType = folder; name = _metadata; path = "../../../web-extension/_metadata"; sourceTree = "<group>"; };
 		FCB0DD012F71B5C10041FA5D /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = "../../../web-extension/icons"; sourceTree = "<group>"; };
 		FCB0DD022F71B5C10041FA5D /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = "../../../web-extension/manifest.json"; sourceTree = "<group>"; };
 		FCB0DD032F71B5C10041FA5D /* rules */ = {isa = PBXFileReference; lastKnownFileType = folder; name = rules; path = "../../../web-extension/rules"; sourceTree = "<group>"; };
@@ -156,7 +154,6 @@
 				FCB0DCFD2F71B5C10041FA5D /* popup.js */,
 				FCB0DCFE2F71B5C10041FA5D /* background.js */,
 				FCB0DCFF2F71B5C10041FA5D /* popup.html */,
-				FCB0DD002F71B5C10041FA5D /* _metadata */,
 				FCB0DD012F71B5C10041FA5D /* icons */,
 				FCB0DD022F71B5C10041FA5D /* manifest.json */,
 				FCB0DD032F71B5C10041FA5D /* rules */,
@@ -268,7 +265,6 @@
 			files = (
 				FCB0DD0C2F71B5C10041FA5D /* rules in Resources */,
 				FCB0DD072F71B5C10041FA5D /* background.js in Resources */,
-				FCB0DD092F71B5C10041FA5D /* _metadata in Resources */,
 				FCB0DD082F71B5C10041FA5D /* popup.html in Resources */,
 				FCB0DD0D2F71B5C10041FA5D /* popup.css in Resources */,
 				FCB0DD0A2F71B5C10041FA5D /* icons in Resources */,
