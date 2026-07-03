@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Still",
-  "version": "1.4",
+  "version": "1.5",
   "description": "Block animated GIFs, WebP, and APNG. Pause autoplay video. Cancel CSS animations.",
   "permissions": [
     "activeTab",
@@ -38,16 +38,24 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["main-world-patch.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "main-world-patch.js"
+      ],
       "world": "MAIN",
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true
@@ -73,8 +81,13 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/frozen.svg", "host-rules.json"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "icons/frozen.svg",
+        "host-rules.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }
