@@ -5,11 +5,11 @@ A cross-browser extension that blocks animated images (GIF, WebP, APNG), replaci
 ## Architecture
 
 - `web-extension/` — The core cross-browser extension (Manifest V3)
-  - `content.js` — Content script injected at `document_start`. Detects and replaces animated images via multiple strategies: regex on URLs, partial-fetch byte inspection for WebP/APNG, HEAD requests for extensionless URLs, MutationObserver for dynamic content, and `src` setter override to prevent page JS from restoring animations.
-  - `background.js` — Service worker. Manages state (enabled toggle, per-site allowlist), badge counts, and optional webRequest header interception (Chrome/Firefox only; Safari falls back to content script probing).
+  - `content.js` — Content script injected at `document_start` in all frames. Detects and replaces animated images via multiple strategies: CSS pre-hide on animated-looking URLs (src/srcset/picture), regex on URLs, partial-fetch byte inspection for WebP/APNG (fail-closed: hidden while checking) and PNG/SVG/AVIF (fail-open: visible while checking), HEAD requests for extensionless URLs, per-URL probe memoization, MutationObserver for dynamic content, and `src` setter override to prevent page JS from restoring animations. Videos are re-paused unless playback was user-initiated (`data-still-user-play`).
+  - `background.js` — Service worker. Manages state (enabled toggle, per-site allowlist), badge counts, cross-origin HEAD probes for content scripts, and webRequest header interception (Chrome/Firefox only; Safari lacks webRequest and relies on content script probing).
   - `popup.html/js/css` — Extension popup UI with global toggle and per-site allowlist toggle.
-  - `manifest.json` — MV3 manifest. Uses `declarativeNetRequest` to block `.gif` at network level; `.webp`/`.apng` rulesets exist but are disabled (content script handles those with animation detection).
-  - `rules/` — declarativeNetRequest rulesets for gif/webp/apng.
+  - `manifest.json` — MV3 manifest. The gif/webp/apng `declarativeNetRequest` rulesets ship **disabled** (the redirect-to-SVG broke spacer detection); all image blocking happens in the content script. Only the gstatic AR-video ruleset is enabled (network-level block).
+  - `rules/` — declarativeNetRequest rulesets for gif/webp/apng (disabled) and gstatic AR videos (enabled).
   - `icons/` — Extension icons + frozen.svg placeholder.
 
 - `Still/` — Xcode project for Safari iOS (generated via `safari-web-extension-converter`)

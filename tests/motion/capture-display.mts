@@ -56,6 +56,11 @@ const windowH = parseInt(arg('window-h', '800'), 10);
 // animations that pure sit-mode misses. Scroll timestamps are recorded so the
 // analyzer can mask them.
 const scrollThenSit = process.argv.includes('--scroll-then-sit');
+// Down-up-down cycles for the whole capture window, going deeper each cycle.
+// Reproduces the user's real-world trigger: "scroll up and down for a while,
+// and new stuff starts loading" — lazy-loaded content entering the viewport
+// repeatedly, including re-entry of already-seen (settled) regions.
+const scrollUpDown = process.argv.includes('--scroll-updown');
 // Use the system Chrome binary (not Playwright's Chromium-for-Testing). Real
 // Chrome has a different TLS fingerprint that Cloudflare-protected sites like
 // axios.com require even with valid cookies. Channel 'chrome' is set up by
@@ -166,6 +171,29 @@ if (scrollThenSit) {
       await page.waitForTimeout(1000);
     }
     // Remaining time of the capture window: just sit.
+  })().catch((e) => console.error('scroll workload error:', (e as Error).message));
+}
+
+if (scrollUpDown) {
+  (async () => {
+    await page.waitForTimeout(500);
+    const doScroll = async (y: number) => {
+      scrollTimes.push((Date.now() - tFfStart) / 1000);
+      try { await page.evaluate((yy) => window.scrollTo({ top: yy, behavior: 'instant' }), y); } catch {}
+      await page.waitForTimeout(800);
+    };
+    const endAt = tFfStart + (seconds - 1) * 1000;
+    let cycle = 0;
+    while (Date.now() < endAt) {
+      cycle++;
+      // Each cycle scrolls deeper than the last so fresh lazy content keeps
+      // entering the viewport, then returns to the top through already-seen
+      // regions (where settled placeholders must NOT re-flicker).
+      const maxY = 1800 * cycle;
+      for (let y = 600; y <= maxY && Date.now() < endAt; y += 600) await doScroll(y);
+      for (let y = maxY - 900; y >= 0 && Date.now() < endAt; y -= 900) await doScroll(y);
+      if (Date.now() < endAt) await doScroll(0);
+    }
   })().catch((e) => console.error('scroll workload error:', (e as Error).message));
 }
 

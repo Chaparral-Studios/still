@@ -2,12 +2,20 @@
    Blocks animated images, replacing them with a static placeholder.
 
    Strategy:
-   1. declarativeNetRequest blocks .gif URLs at network level (always animated)
-   2. .webp/.apng — fetched partially to check for animation markers before replacing
-   3. Extensionless URLs — HEAD request to check content-type
-   4. lockImage() overrides img.src setter to prevent page JS from swapping back
-   5. Cancels CSS animations
-   Note: video elements are left to other extensions (e.g. StopTheMadness Pro) */
+   1. CSS pre-hide at document_start for URLs that look animated (.gif/.webp/
+      .apng in src, srcset, or <picture> sources) — nothing paints unverified
+   2. .gif — always animated; replaced with a static placeholder
+   3. .webp/.apng — fetched partially to check for animation markers before replacing
+   4. .png/.svg/.avif — usually static, but all three CAN animate; probed
+      fail-open (visible while checking, replaced if animation is found)
+   5. Extensionless URLs — HEAD request to check content-type
+   6. lockImage() overrides img.src setter to prevent page JS from swapping back
+   7. Cancels CSS animations
+   Note: the gif/webp/apng declarativeNetRequest rulesets ship DISABLED — the
+   redirect-to-frozen.svg broke spacer detection (naturalWidth becomes the
+   SVG's dimensions). GIF blocking is CSS pre-hide + JS replacement, here.
+   Videos: paused until user-initiated playback (see pauseVideos); gstatic AR
+   preview videos are blocked outright (network rule + play() neutering). */
 
 (function () {
   'use strict';
@@ -15,7 +23,12 @@
   const GIF_EXT_RE = /\.gif(\?|$)/i;
   const MAYBE_ANIMATED_EXT_RE = /\.(webp|apng)(\?|$)/i;
   const DATA_GIF_RE = /^data:image\/gif[;,]/i;
-  const STATIC_EXT_RE = /\.(jpe?g|png|svg|bmp|ico|avif)(\?|$)/i;
+  const STATIC_EXT_RE = /\.(jpe?g|bmp|ico)(\?|$)/i;
+  // Usually static, but each CAN animate: APNG is almost always served with a
+  // plain `.png` extension (`.apng` is rare in the wild), SVG-in-<img> can run
+  // SMIL/CSS animations, and animated AVIF (image sequences) exists. These are
+  // far too common to hide while checking — probed fail-open instead (Path B2).
+  const OPEN_PROBE_EXT_RE = /\.(png|svg|avif)(\?|$)/i;
   let enabled = true;
   let siteAllowed = false;
 
@@ -24,6 +37,41 @@
 
   const replacedURLs = new Set();
   const flaggedAnimatedURLs = new Set();
+
+  // Selectors under which the stylesheet below pre-hides an <img>.
+  // The ` i` flag matters: attribute selectors are case-sensitive by default,
+  // and a cached `foo.GIF` could paint-and-animate in the window between
+  // parse and our first JS scan. The srcset selectors are substring matches
+  // (can false-positive on e.g. `gift-card.jpg`), which is safe: a hidden
+  // static image is unhidden by processImage; a visible animated one is not
+  // recoverable.
+  const HIDE_IMG_SELECTOR = [
+    'img[src$=".gif" i]', 'img[src*=".gif?" i]',
+    'img[src$=".webp" i]', 'img[src*=".webp?" i]',
+    'img[src$=".apng" i]', 'img[src*=".apng?" i]',
+    'img[srcset*=".gif" i]', 'img[srcset*=".webp" i]', 'img[srcset*=".apng" i]',
+    'img[src^="data:image/gif" i]'
+  ].join(',\n');
+  // <picture> can source the animated URL from a <source> sibling while the
+  // <img> itself carries no hint. :has() is Safari 15.4+ / Chrome 105+; kept
+  // as a separate rule so engines without :has() drop only this rule, not
+  // the block above.
+  const HIDE_PICTURE_SELECTOR = [
+    'picture:has(source[srcset*=".gif" i]) img',
+    'picture:has(source[srcset*=".webp" i]) img',
+    'picture:has(source[srcset*=".apng" i]) img'
+  ].join(',\n');
+
+  // Whether our stylesheet is (potentially) pre-hiding this img. Used to
+  // decide if a verified-static image needs the explicit data-still="static"
+  // unhide. We deliberately do NOT blanket-mark every static image: the
+  // `visibility: visible !important` rule would override visibility states
+  // the page manages itself (carousel off-slides, dropdown thumbnails).
+  function matchesHide(img) {
+    if (!img.matches) return false;
+    try { if (img.matches(HIDE_IMG_SELECTOR)) return true; } catch (e) {}
+    try { return img.matches(HIDE_PICTURE_SELECTOR); } catch (e) { return false; }
+  }
 
   // --- CSS: hide potentially-animated images while checking; stabilize replaced images;
   //         kill all transitions to prevent smooth/subliminal motion ---
@@ -49,9 +97,9 @@
     '  visibility: hidden !important;',
     '}',
     // Hide .gif/.webp/.apng while we check — visibility:hidden preserves layout (no shift)
-    'img[src$=".gif"], img[src*=".gif?"],',
-    'img[src$=".webp"], img[src*=".webp?"],',
-    'img[src$=".apng"], img[src*=".apng?"]',
+    HIDE_IMG_SELECTOR,
+    '{ visibility: hidden !important; }',
+    HIDE_PICTURE_SELECTOR,
     '{ visibility: hidden !important; }',
     'img[data-still="replacing"] { visibility: hidden !important; }',
     // Once confirmed static, unhide (set by JS via data-still="static")
@@ -198,15 +246,62 @@
   function isExtensionless(src) {
     if (!src) return false;
     if (src.startsWith('data:')) return false;
-    return !GIF_EXT_RE.test(src) && !MAYBE_ANIMATED_EXT_RE.test(src) && !STATIC_EXT_RE.test(src);
+    return !GIF_EXT_RE.test(src) && !MAYBE_ANIMATED_EXT_RE.test(src) &&
+           !STATIC_EXT_RE.test(src) && !OPEN_PROBE_EXT_RE.test(src);
   }
 
   // --- Replace image with placeholder ---
+
+  function freezeDimensions(img) {
+    // Pin the layout box BEFORE swapping src: the placeholder SVG is 100×100
+    // intrinsic, so an intrinsically-sized image would reflow (e.g. a
+    // 1814×504 hero collapsing to 100×100) and everything below it jumps —
+    // masonry grids re-layout under the user mid-scroll (measured on
+    // giphy.com; scroll "page jumps" are a reported migraine trigger).
+    // width/height attrs are presentational hints: they pin intrinsically-
+    // sized images but lose to any page CSS, so responsive layouts keep
+    // control.
+    if (img.getAttribute('width') || img.getAttribute('height')) return;
+    let w = img.offsetWidth;
+    let h = img.offsetHeight;
+    if (!(w > 0 && h > 0)) {
+      // Not laid out (display:none subtree etc.) — fall back to the
+      // original resource's intrinsic size, captured before the swap.
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+    }
+    if (w > 0 && h > 0) {
+      try {
+        img.setAttribute('width', String(w));
+        img.setAttribute('height', String(h));
+      } catch (e) {}
+    }
+  }
+
+  // Verdicts arrive one probe at a time, so applying each instantly makes
+  // tiles pop in one-by-one during scroll (measured on giphy.com: roughly
+  // one tile per frame dribbling in over ~750ms after each scroll step).
+  // Queue hidden→visible state flips and flush them together so a batch
+  // appears in a single paint. Only used for images that are currently
+  // HIDDEN (probing) — delaying those is fail-safe. Never used for the
+  // fail-open Path B2, where a delay would extend visible animation.
+  const revealQueue = [];
+  let revealTimer = null;
+  function queueReveal(fn) {
+    revealQueue.push(fn);
+    if (revealTimer) return;
+    revealTimer = setTimeout(() => {
+      revealTimer = null;
+      const q = revealQueue.splice(0);
+      for (const f of q) { try { f(); } catch (e) {} }
+    }, 120);
+  }
 
   function replaceWithPlaceholder(img) {
     const originalSrc = img.currentSrc || img.src;
     replacedURLs.add(originalSrc);
 
+    freezeDimensions(img);
     clearPictureSources(img);
     if (img.srcset) img.srcset = '';
     img.src = PLACEHOLDER;
@@ -263,8 +358,10 @@
         bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x58) {
       if (bytes[20] & 0x02) return true;
     }
-    // Fallback: scan for ANMF chunk which indicates animation frames
-    for (let i = 0; i < bytes.length - 4; i++) {
+    // Fallback: scan for ANMF chunk which indicates animation frames.
+    // Bound is length - 3 (not - 4): a marker occupying the final 4 bytes
+    // must still be checked.
+    for (let i = 0; i < bytes.length - 3; i++) {
       if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x4D && bytes[i+3] === 0x46) return true;
     }
     return false;
@@ -272,27 +369,136 @@
 
   function isAnimatedPNGBuffer(bytes) {
     // Look for acTL chunk which indicates APNG animation
-    for (let i = 0; i < bytes.length - 4; i++) {
+    for (let i = 0; i < bytes.length - 3; i++) {
       if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4C) return true;
     }
     return false;
   }
 
+  function isAnimatedAVIFBuffer(bytes) {
+    // Animated AVIF (image sequence) declares the 'avis' brand in its ftyp
+    // box; still AVIF uses 'avif'. The ftyp box is the first box in the
+    // file, so scanning the first 64 bytes covers major + compatible brands
+    // without ever reading codec payload (no false-positive risk).
+    const limit = Math.min(bytes.length - 3, 64);
+    for (let i = 8; i < limit; i++) {
+      if (bytes[i] === 0x61 && bytes[i+1] === 0x76 && bytes[i+2] === 0x69 && bytes[i+3] === 0x73) return true;
+    }
+    return false;
+  }
+
+  // Read at most `limit` bytes of a response body. We ask for
+  // `Range: bytes=0-4095`, but many CDNs ignore Range and return 200 with
+  // the FULL body — `res.arrayBuffer()` would then buffer the entire file,
+  // double-downloading every probed image (the probe races the renderer's
+  // own fetch). Stream just the prefix and cancel.
+  function readFirstBytes(res, limit) {
+    if (res.status === 206 || !res.body || typeof res.body.getReader !== 'function') {
+      return res.arrayBuffer().then((buf) => new Uint8Array(buf));
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    const concat = () => {
+      // Hard-cap at `limit`: a single read() chunk can carry the whole body
+      // (fast/local origins), and scanning past the requested window would
+      // make classification depend on network chunking.
+      const out = new Uint8Array(Math.min(total, limit));
+      let o = 0;
+      for (const c of chunks) {
+        const room = out.length - o;
+        if (room <= 0) break;
+        out.set(room >= c.length ? c : c.subarray(0, room), o);
+        o += Math.min(c.length, room);
+      }
+      return out;
+    };
+    const pump = () => reader.read().then(({ done, value }) => {
+      if (done) return concat();
+      chunks.push(value);
+      total += value.length;
+      if (total >= limit) {
+        reader.cancel().catch(() => {});
+        return concat();
+      }
+      return pump();
+    });
+    return pump();
+  }
+
+  // --- Per-URL probe memoization ---
+  // Pages repeat the same asset across many <img> elements (product grids,
+  // avatars, emoji). Probing each element separately costs a network
+  // round-trip per instance and holds each one hidden while its own probe
+  // resolves — most of the visible "pop-in" on real pages. Memoize by URL so
+  // repeats resolve from the same promise. Transient verdicts ('unknown' /
+  // null, e.g. a Cloudflare interstitial 403) are evicted so the load-event
+  // retry paths get a fresh probe instead of the stale failure.
+  const probeCache = new Map();
+  function memoProbe(prefix, url, fn) {
+    const key = prefix + url;
+    let p = probeCache.get(key);
+    if (!p) {
+      p = fn(url).then((result) => {
+        if (result === 'unknown' || result === null || result === undefined) {
+          probeCache.delete(key);
+        }
+        return result;
+      });
+      probeCache.set(key, p);
+    }
+    return p;
+  }
+
   function checkAnimationByPartialFetch(url) {
-    // Fetch first 4KB — enough to find ANMF (WebP) or acTL (APNG) markers
-    return fetch(url, {
+    // Fetch first 4KB — enough to find ANMF (WebP) or acTL (APNG) markers.
+    // Resolves true/false, or null on fetch failure (treated as static by
+    // callers — fail open — but not memoized, so a later retry can succeed).
+    return memoProbe('pf:', url, (u) => fetch(u, {
       credentials: 'omit',
       headers: { 'Range': 'bytes=0-4095' }
     })
-      .then((res) => res.arrayBuffer())
-      .then((buf) => {
-        const bytes = new Uint8Array(buf);
-        if (url.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
-        if (url.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
+      .then((res) => readFirstBytes(res, 4096))
+      .then((bytes) => {
+        if (u.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
+        if (u.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
         // Check both if unclear
         return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
       })
-      .catch(() => false);
+      .catch(() => null));
+  }
+
+  // --- Fail-open probes for .png/.svg/.avif (Path B2) ---
+  // These stay visible while we check (hiding every PNG on every page would
+  // flicker constantly), and get replaced if the probe finds animation —
+  // typically within one round-trip of first paint.
+
+  function checkSVGAnimated(url) {
+    return fetch(url, { credentials: 'omit' })
+      .then((r) => (r.ok ? r.text() : ''))
+      .then((text) => {
+        if (!text) return null;
+        // SMIL animation elements, or CSS keyframes that are actually
+        // referenced by an animation property (requiring both avoids
+        // flagging files that ship unused keyframe defs).
+        if (/<(animateTransform|animateMotion|animate|set)[\s>]/i.test(text)) return true;
+        if (/@keyframes/i.test(text) && /animation(-name)?\s*:/i.test(text)) return true;
+        return false;
+      })
+      .catch(() => null);
+  }
+
+  function checkOpenProbe(url) {
+    return memoProbe('op:', url, (u) => {
+      if (/\.svg(\?|$)/i.test(u)) return checkSVGAnimated(u);
+      return fetch(u, { credentials: 'omit', headers: { 'Range': 'bytes=0-4095' } })
+        .then((res) => readFirstBytes(res, 4096))
+        .then((bytes) => {
+          if (/\.avif(\?|$)/i.test(u)) return isAnimatedAVIFBuffer(bytes);
+          return isAnimatedPNGBuffer(bytes);
+        })
+        .catch(() => null);
+    });
   }
 
   // --- Detect animation for extensionless URLs ---
@@ -306,8 +512,9 @@
     const ct = (rawCt || '').toLowerCase();
     if (ct.includes('image/gif')) return 'animated';
     if (ct.includes('image/jpeg') || ct.includes('image/svg') ||
-        ct.includes('image/bmp') || ct.includes('image/avif')) return 'static';
-    if (ct.includes('image/webp') || ct.includes('image/png') || ct.includes('image/apng')) return 'frame-data';
+        ct.includes('image/bmp')) return 'static';
+    if (ct.includes('image/webp') || ct.includes('image/png') ||
+        ct.includes('image/apng') || ct.includes('image/avif')) return 'frame-data';
     return 'unknown';
   }
 
@@ -337,24 +544,24 @@
   }
 
   function detectAnimationForExtensionless(url) {
-    return fetch(url, { method: 'HEAD', credentials: 'omit' })
+    return memoProbe('hd:', url, (u) => fetch(u, { method: 'HEAD', credentials: 'omit' })
       .then((res) => {
         if (!res.ok) return 'unknown';
         const cls = classifyByContentType(res.headers.get('content-type'));
         if (cls !== 'frame-data') return cls;
-        // WebP / APNG / non-animated PNG: need byte-level inspection.
-        return fetch(url, {
+        // WebP / APNG / non-animated PNG / AVIF: need byte-level inspection.
+        return fetch(u, {
           credentials: 'omit',
           headers: { 'Range': 'bytes=0-4095' }
         })
-          .then((res2) => res2.arrayBuffer())
-          .then((buf) => {
-            const bytes = new Uint8Array(buf);
-            return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes)) ? 'animated' : 'static';
+          .then((res2) => readFirstBytes(res2, 4096))
+          .then((bytes) => {
+            return (isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes) ||
+                    isAnimatedAVIFBuffer(bytes)) ? 'animated' : 'static';
           })
           .catch(() => 'unknown');
       })
-      .catch(() => probeViaBackground(url));
+      .catch(() => probeViaBackground(u)));
   }
 
   // --- Spacer detection ---
@@ -384,13 +591,20 @@
     // let a real animated GIF leak through after a lazy-load swap from a
     // 1×1 placeholder (whose nw/nh briefly remain as 1×1).
     if (img.complete && nw > 0 && nh > 0 && nw <= 1 && nh <= 1) return true;
-    // Check HTML attributes (width="1" height="1")
+    // HTML width="1" height="1" attrs. Only trust alongside natural-dim
+    // confirmation: homedepot.com sets width="1" height="1" on real `<img>`
+    // elements that CSS (`sui-w-full sui-h-full`) sizes to the container,
+    // so the attrs are a layout placeholder, not a 1×1 spacer. Without
+    // natural-dim corroboration we'd mark a 1814×504 animated hero static.
     const aw = parseInt(img.getAttribute('width'), 10);
     const ah = parseInt(img.getAttribute('height'), 10);
-    if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0) return true;
-    // Check if the element is invisible (zero layout size) — but only if
-    // natural dimensions confirm it's truly tiny (not just unloaded/hidden)
-    if (img.offsetWidth === 0 && img.offsetHeight === 0 && nw > 0 && nh > 0) return true;
+    if (aw <= 1 && ah <= 1 && aw > 0 && ah > 0 &&
+        img.complete && nw > 0 && nh > 0 && nw <= 4 && nh <= 4) return true;
+    // Zero layout size + tiny natural — collapsed-parent genuine spacer.
+    // Don't catch large-natural images in collapsed parents: those are
+    // real images temporarily hidden by their layout chain, not spacers.
+    if (img.offsetWidth === 0 && img.offsetHeight === 0 &&
+        nw > 0 && nh > 0 && nw <= 4 && nh <= 4) return true;
     // Filename hints — classic spacer names (1x1.trans.gif, blank.gif, etc.).
     // Narrow match: spacer keyword must be the filename basename, not a prefix.
     const src = img.currentSrc || img.src || '';
@@ -446,6 +660,15 @@
         img.dataset.still = 'probing';
         img.style.visibility = 'hidden';
         const settle = () => {
+          // src swapped mid-probe (lazy-load) — the observer deliberately
+          // ignores src changes while probing, so decide here against the
+          // NEW resource instead of stale evidence about the old one.
+          if ((img.currentSrc || img.src) !== src) {
+            img.dataset.still = '';
+            img.style.visibility = '';
+            processImage(img);
+            return;
+          }
           if (isSpacer(img)) {
             img.dataset.still = 'static';
             img.style.visibility = '';
@@ -454,7 +677,10 @@
             replaceWithPlaceholder(img);
           }
         };
-        img.addEventListener('load', settle, { once: true });
+        // Batch the reveal: the img is hidden during the probe, so deferring
+        // the state flip by one flush window is fail-safe, and grouped flips
+        // stop the one-tile-per-frame dribble on grid pages.
+        img.addEventListener('load', () => queueReveal(settle), { once: true });
         // If the image fails to load (broken URL), unhide rather than leave
         // the viewport empty. It'll be re-checked if src changes.
         img.addEventListener('error', () => {
@@ -470,8 +696,52 @@
       return;
     }
 
-    // --- Path B: known static extension — skip ---
-    if (hasStaticExtension(src)) return;
+    // --- Path B: known static extension — skip. One wrinkle: our CSS may be
+    // pre-hiding this img via a srcset substring match (e.g. srcset mentions
+    // ".webp" variants while src is the .jpg fallback). Unhide via
+    // data-still="static" — but only once loading settles, so we mark the
+    // resource that actually won selection, not the fallback. ---
+    if (hasStaticExtension(src)) {
+      if (matchesHide(img)) {
+        if (img.complete) {
+          img.dataset.still = 'static';
+        } else {
+          img.addEventListener('load', () => { img.dataset.still = ''; processImage(img); }, { once: true });
+          img.addEventListener('error', () => { if (!img.dataset.still) img.dataset.still = 'static'; }, { once: true });
+        }
+      }
+      return;
+    }
+
+    // --- Path B2: .png/.svg/.avif — usually static, but APNG ships as .png,
+    // SVG-in-<img> can run SMIL/CSS animations, and animated AVIF exists.
+    // Probe fail-OPEN: the image stays visible while we check and is replaced
+    // if animation is found. State is 'checking' (not 'probing') on purpose:
+    // the MutationObserver still re-dispatches on src swaps, so a lazy-load
+    // to .gif mid-check is caught immediately rather than after the probe. ---
+    if (OPEN_PROBE_EXT_RE.test(src)) {
+      if (img.dataset.still === 'checking' || img.dataset.still === 'checked' ||
+          img.dataset.still === 'static') return;
+      img.dataset.still = 'checking';
+      checkOpenProbe(src).then((animated) => {
+        if (img.dataset.still !== 'checking') return; // re-dispatched meanwhile
+        if ((img.currentSrc || img.src) !== src) {
+          img.dataset.still = '';
+          processImage(img);
+          return;
+        }
+        if (animated) {
+          replaceWithPlaceholder(img);
+        } else {
+          // 'checked' carries no CSS rule — we never hid the image, so we
+          // must not force `visibility: visible` on it either (that would
+          // override page-managed visibility, e.g. carousel off-slides).
+          // 'static' only when our own stylesheet is hiding it.
+          img.dataset.still = matchesHide(img) ? 'static' : 'checked';
+        }
+      });
+      return;
+    }
 
     // --- Path C: flagged by webRequest header inspection ---
     if (flaggedAnimatedURLs.has(src)) {
@@ -485,13 +755,21 @@
       if (img.dataset.still === 'probing' || img.dataset.still === 'static') return;
       img.dataset.still = 'probing';
 
-      checkAnimationByPartialFetch(src).then((animated) => {
+      checkAnimationByPartialFetch(src).then((animated) => queueReveal(() => {
+        // src swapped mid-probe — re-dispatch against the new resource.
+        // (Checked at flush time, inside the queued closure, so the batch
+        // delay can't reintroduce the stale-verdict race.)
+        if ((img.currentSrc || img.src) !== src) {
+          img.dataset.still = '';
+          processImage(img);
+          return;
+        }
         if (animated) {
           replaceWithPlaceholder(img);
         } else {
           img.dataset.still = 'static';
         }
-      });
+      }));
       return;
     }
 
@@ -501,7 +779,18 @@
       img.dataset.still = 'probing';
       img.style.visibility = 'hidden';
 
-      const apply = (result) => {
+      const apply = (result) => queueReveal(() => {
+        // src swapped mid-probe (lazy-load placeholder → real image). The
+        // old URL's verdict must not be applied: it could replace a now-
+        // static image or, worse, mark data-still="static" (visible
+        // !important) while the element now shows an animated GIF.
+        // (Checked at flush time, inside the queued closure.)
+        if ((img.currentSrc || img.src) !== src) {
+          img.dataset.still = '';
+          img.style.visibility = '';
+          processImage(img);
+          return;
+        }
         if (result === 'animated') {
           replaceWithPlaceholder(img);
         } else {
@@ -510,7 +799,7 @@
           img.dataset.still = 'static';
           img.style.visibility = '';
         }
-      };
+      });
 
       detectAnimationForExtensionless(src).then((result) => {
         if (result !== 'unknown') {
@@ -536,6 +825,25 @@
           img.addEventListener('error', () => apply('static'), { once: true });
         }
       });
+      return;
+    }
+
+    // --- Path F: no usable URL yet (empty src, srcset not yet resolved) ---
+    // Our CSS may still be pre-hiding this img via a srcset/<picture>
+    // substring match, and srcset resolution mutates no attribute (so the
+    // observer never fires). Re-dispatch once the browser has selected and
+    // loaded a resource; unhide if it never loads.
+    if (!src && matchesHide(img) && !img.__stillAwaitingSrc) {
+      img.__stillAwaitingSrc = true;
+      img.addEventListener('load', () => {
+        img.__stillAwaitingSrc = false;
+        img.dataset.still = '';
+        processImage(img);
+      }, { once: true });
+      img.addEventListener('error', () => {
+        img.__stillAwaitingSrc = false;
+        if (!img.dataset.still) img.dataset.still = 'static';
+      }, { once: true });
     }
   }
 
@@ -549,7 +857,16 @@
     for (const el of candidates) {
       if (bgChecked.has(el)) continue;
       const bg = getComputedStyle(el).backgroundImage;
-      if (!bg || bg === 'none') continue;
+      if (!bg || bg === 'none') {
+        // Negative-cache, but only once the page has fully loaded: caching
+        // "no background" while stylesheets are still arriving would
+        // permanently skip an element whose gif background applies late.
+        // Without this cache, every mutation-triggered scan re-ran
+        // getComputedStyle (a forced style resolution) on nearly every
+        // element on the page — the dominant scan cost on large pages.
+        if (document.readyState === 'complete') bgChecked.add(el);
+        continue;
+      }
       bgChecked.add(el);
       // Check if any url() in the background-image points to a GIF
       if (/url\(["']?[^"')]*\.gif(\?[^"')]*)?["']?\)/i.test(bg)) {
@@ -610,11 +927,47 @@
     } catch (e) {}
   }
 
-  function pauseVideos() {
-    document.querySelectorAll('video').forEach((v) => {
+  // Autoplay policy: a video is kept paused until playback is user-initiated.
+  // Re-pause on every scan (autoplay implementations retry), EXCEPT videos
+  // marked data-still-user-play — set when playback starts close to a real
+  // user gesture. Two independent writers set that mark:
+  //   1. main-world-patch.js's play() override, via navigator.userActivation
+  //      (synchronous with the play call — most reliable);
+  //   2. the gesture tracker below — capture-phase listeners in the isolated
+  //      world, which keeps working when a strict CSP drops the main-world
+  //      patch (google.com's require-trusted-types-for is the canonical case).
+  // Without the exemption, every DOM mutation triggered a scan that re-paused
+  // ALL videos, including ones the user deliberately started — YouTube kept
+  // pausing mid-watch (user report 2026-07-01).
+  let lastGestureAt = -Infinity;
+  ['pointerdown', 'keydown', 'touchstart'].forEach((t) => {
+    try {
+      document.addEventListener(t, () => { lastGestureAt = performance.now(); },
+        { capture: true, passive: true });
+    } catch (e) {}
+  });
+  // 'play' doesn't bubble, but capture-phase listeners on document still see
+  // it. The 2s window is wide enough for click→play handlers and SPA
+  // navigations, narrow enough that scroll-triggered autoplay (wheel/trackpad
+  // scrolling fires no pointerdown) stays out.
+  document.addEventListener('play', (e) => {
+    const v = e.target;
+    if (!v || v.tagName !== 'VIDEO') return;
+    if (v.dataset.stillVideo === 'blocked') return;
+    if (performance.now() - lastGestureAt < 2000) {
+      try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
+    }
+  }, true);
+
+  function handleVideo(v) {
+    if (!v.hasAttribute('data-still-user-play')) {
       try { v.pause(); } catch (e) {}
-      if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
-    });
+    }
+    if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
+  }
+
+  function pauseVideos() {
+    document.querySelectorAll('video').forEach(handleVideo);
   }
 
   // --- Scanning ---
@@ -654,14 +1007,10 @@
               if (node.tagName === 'IMG') {
                 processImage(node);
               } else if (node.tagName === 'VIDEO') {
-                try { node.pause(); } catch (e) {}
-                if (isVideoPreviewToBlock(node)) blockVideoPreview(node);
+                handleVideo(node);
               } else if (node.querySelectorAll) {
                 node.querySelectorAll('img').forEach(processImage);
-                node.querySelectorAll('video').forEach((v) => {
-                  try { v.pause(); } catch (e) {}
-                  if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
-                });
+                node.querySelectorAll('video').forEach(handleVideo);
                 // Check for SVG animations in added subtree
                 if (node.tagName === 'SVG' || node.querySelector?.('svg, animate, animateTransform, animateMotion, set')) {
                   killSVGAnimations();
@@ -714,11 +1063,15 @@
       if (needsScan) scheduleScan();
     });
 
+    // NOTE: 'd' is intentionally NOT in the filter — the handler has no
+    // branch for SVG geometry (main-world-patch.js owns that), and a D3
+    // chart animating `d` per rAF tick would fire this callback every frame
+    // for nothing.
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'd']
+      attributeFilter: ['src', 'srcset']
     });
 
   }
@@ -812,7 +1165,9 @@
       isSpacer, isAnimatedDataGif,
       scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
       cancelAnimations,
-      isVideoPreviewToBlock, blockVideoPreview, pauseVideos,
+      isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
+      isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
+      checkOpenProbe, matchesHide, probeCache,
     };
   }
 

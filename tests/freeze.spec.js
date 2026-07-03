@@ -22,6 +22,8 @@ function createHandler(corsOrigin) {
       '.html': 'text/html',
       '.gif': 'image/gif',
       '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.webp': 'image/webp',
       '.js': 'text/javascript'
     };
 
@@ -55,6 +57,71 @@ function createHandler(corsOrigin) {
     if (urlPath === '/broken-image') {
       res.writeHead(404, { 'Content-Type': 'text/html' });
       res.end('not found');
+      return;
+    }
+
+    // Uppercase .GIF route — exercises the case-insensitive CSS/regex paths.
+    // A real route (not a fixture file) so the test doesn't depend on the
+    // filesystem's case-sensitivity.
+    if (urlPath === '/UPPER.GIF') {
+      const gifPath = path.join(TESTS_DIR, 'fixtures', 'animated.gif');
+      res.writeHead(200, { 'Content-Type': 'image/gif' });
+      res.end(fs.readFileSync(gifPath));
+      return;
+    }
+
+    // Never responds — keeps an <img> permanently in its loading state so
+    // tests can observe the pre-verification CSS hide with no race.
+    if (urlPath === '/hang.GIF' || urlPath === '/hang.gif') {
+      return; // no response, socket stays open
+    }
+
+    // Extensionless URL whose HEAD is slow — used by the stale-src race test
+    // (src is swapped to an animated gif while the probe is in flight).
+    if (urlPath === '/slow-head-image') {
+      if (req.method === 'HEAD') {
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+          res.end();
+        }, 500);
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(fs.readFileSync(path.join(TESTS_DIR, 'fixtures', 'static.png')));
+      return;
+    }
+
+    // Large static WebP whose ONLY 'ANMF' byte-sequence sits far beyond the
+    // 4KB probe window, served as 200 (Range ignored). A probe that buffers
+    // the whole body would hit the ANMF fallback scan and misclassify it as
+    // animated; a prefix-truncated read classifies it static. Regression
+    // guard for readFirstBytes.
+    if (urlPath === '/big.webp') {
+      const head = Buffer.concat([
+        Buffer.from('RIFF'), Buffer.from([0, 0, 1, 0]), Buffer.from('WEBP'),
+        Buffer.from('VP8X'), Buffer.from([10, 0, 0, 0]),
+        Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // anim flag clear
+      ]);
+      const junk = Buffer.alloc(60000, 7);
+      Buffer.from('ANMF').copy(junk, 50000);
+      res.writeHead(200, { 'Content-Type': 'image/webp' });
+      res.end(Buffer.concat([head, junk]));
+      return;
+    }
+
+    // Static WebP route that counts probe requests (Range header) — verifies
+    // per-URL probe memoization. Minimal RIFF/WEBP container: enough for the
+    // byte inspector (no VP8X anim flag, no ANMF chunk → static verdict).
+    if (urlPath === '/counted.webp') {
+      if (req.headers.range) {
+        global.__webpProbeCount = (global.__webpProbeCount || 0) + 1;
+      }
+      const webp = Buffer.concat([
+        Buffer.from('RIFF'), Buffer.from([12, 0, 0, 0]),
+        Buffer.from('WEBP'), Buffer.from('VP8 '), Buffer.from([0, 0, 0, 0]),
+      ]);
+      res.writeHead(200, { 'Content-Type': 'image/webp' });
+      res.end(webp);
       return;
     }
 
@@ -127,6 +194,7 @@ test.afterAll(async () => {
 // interstitial-race simulation.)
 test.beforeEach(() => {
   global.__cfHeadCount = 0;
+  global.__webpProbeCount = 0;
 });
 
 async function injectContentScript(page, opts = {}) {
@@ -293,9 +361,15 @@ test.describe('Still — block and replace logic', () => {
         webp: isMaybeAnimated('https://example.com/anim.webp'),
         apng: isMaybeAnimated('https://example.com/anim.apng'),
         dataGif: isDefinitelyAnimated('data:image/gif;base64,R0lGOD'),
+        // png/svg/avif are no longer "definitely static" — APNG ships as
+        // .png, SVG-in-<img> can animate, animated AVIF exists. They get
+        // the fail-open probe path instead (and must not be extensionless).
         png: hasStaticExtension('https://example.com/photo.png'),
         jpg: hasStaticExtension('https://example.com/photo.jpg'),
         svg: hasStaticExtension('https://example.com/icon.svg'),
+        pngExtless: isExtensionless('https://example.com/photo.png'),
+        svgExtless: isExtensionless('https://example.com/icon.svg'),
+        avifExtless: isExtensionless('https://example.com/photo.avif'),
         cdnUrl: isExtensionless('https://images.wsj.net/im-59533137?size=1&width=74'),
         cdnPath: isExtensionless('https://cdn.example.com/images/12345'),
         emptyDefinite: isDefinitelyAnimated(''),
@@ -312,9 +386,12 @@ test.describe('Still — block and replace logic', () => {
     expect(results.webp).toBe(true);
     expect(results.apng).toBe(true);
     expect(results.dataGif).toBe(true);
-    expect(results.png).toBe(true);
+    expect(results.png).toBe(false);
     expect(results.jpg).toBe(true);
-    expect(results.svg).toBe(true);
+    expect(results.svg).toBe(false);
+    expect(results.pngExtless).toBe(false);
+    expect(results.svgExtless).toBe(false);
+    expect(results.avifExtless).toBe(false);
     expect(results.cdnUrl).toBe(true);
     expect(results.cdnPath).toBe(true);
     expect(results.emptyDefinite).toBe(false);
@@ -854,6 +931,32 @@ test.describe('Still — block and replace logic', () => {
     );
     const src = await page.$eval('#img-misleading-name', (el) => el.src);
     expect(src).toMatch(/^data:image\/svg\+xml/); // replaced, not leaked
+  });
+
+  test('STILL replaces a real GIF with width="1" height="1" HTML attrs (homedepot CSS-sizing pattern)', async ({ page }) => {
+    // homedepot.com renders <img width="1" height="1" class="sui-w-full sui-h-full">
+    // as a layout placeholder — utility CSS sizes the image to its container.
+    // Before the fix, isSpacer trusted the 1×1 HTML attrs alone and marked the
+    // 1814×504 Memorial Day hero GIF as static at document_start, before load.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-css-sized-hero';
+      img.setAttribute('width', '1');
+      img.setAttribute('height', '1');
+      img.style.width = '800px';
+      img.style.height = '200px';
+      img.src = base + '/fixtures/test-slow.gif';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.waitForFunction(
+      () => document.getElementById('img-css-sized-hero').dataset.still === 'replaced',
+      { timeout: 3000 }
+    );
+    const src = await page.$eval('#img-css-sized-hero', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
   });
 
   test('extensionless URL serving animated GIF: no visible-render window before block', async ({ page }) => {
@@ -1418,5 +1521,350 @@ test.describe('Still — block and replace logic', () => {
     expect(result.v2_taggedAfter).toBe('blocked');
     // Control: unrelated video not tagged
     expect(result.v3_taggedAfter).toBeNull();
+  });
+
+  // --- safety-hardening branch coverage ---
+
+  test('replaces uppercase .GIF URLs (case-insensitive matching)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-upper-gif';
+      img.src = base + '/UPPER.GIF';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-upper-gif')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    const src = await page.$eval('#img-upper-gif', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('CSS pre-hide covers uppercase extensions and srcset (no inline style needed)', async ({ page }) => {
+    // The CSS layer is what protects the window BEFORE processImage runs
+    // (e.g. cached image painting at parse time). Verify the stylesheet
+    // alone hides these, by clearing any inline visibility processImage set.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    const result = await page.evaluate((base) => {
+      const mk = (attrs) => {
+        const img = document.createElement('img');
+        for (const [k, v] of Object.entries(attrs)) img.setAttribute(k, v);
+        document.body.appendChild(img);
+        img.style.visibility = ''; // strip inline hide; CSS must hold alone
+        return getComputedStyle(img).visibility;
+      };
+      return {
+        upper: mk({ src: base + '/hang.GIF' }),
+        srcsetOnly: mk({ srcset: base + '/hang.gif 1x' }),
+        control: mk({ src: base + '/fixtures/static.png' }),
+      };
+    }, baseURL);
+    expect(result.upper).toBe('hidden');
+    expect(result.srcsetOnly).toBe('hidden');
+    expect(result.control).toBe('visible');
+  });
+
+  test('replaces animated GIF that arrives via srcset only (no src attribute)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-srcset-gif';
+      img.style.width = '100px';
+      img.style.height = '100px';
+      img.setAttribute('srcset', base + '/fixtures/test-slow.gif 1x');
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-srcset-gif')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    const src = await page.$eval('#img-srcset-gif', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('static-ext image hidden by a srcset substring match is unhidden after load', async ({ page }) => {
+    // srcset mentions ".webp" (2x candidate) but DPR-1 selection picks the
+    // static .png src. The CSS srcset selector hides the element; Path B
+    // must mark it static once loading settles so it becomes visible again.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-webp-srcset-jpg-src';
+      img.setAttribute('srcset', base + '/nonexistent-2x.webp 2x');
+      img.src = base + '/fixtures/static.png';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(() => {
+      const img = document.getElementById('img-webp-srcset-jpg-src');
+      return img && img.dataset.still === 'static' &&
+             getComputedStyle(img).visibility === 'visible';
+    }, { timeout: 5000 });
+  });
+
+  test('stale-src race: extensionless probe result is not applied to a swapped-in GIF', async ({ page }) => {
+    // src starts as an extensionless URL whose HEAD is slow (500ms → jpeg/
+    // static verdict). Mid-probe, page JS swaps src to an animated GIF —
+    // the lazy-load pattern. The old code applied the stale 'static'
+    // verdict (visibility:visible !important) to the new GIF; the fix
+    // re-dispatches processImage against the current src.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-stale-race';
+      img.src = base + '/slow-head-image';
+      document.body.appendChild(img);
+      setTimeout(() => { img.src = base + '/fixtures/animated.gif'; }, 100);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-stale-race')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    const src = await page.$eval('#img-stale-race', (el) => el.src);
+    expect(src).toMatch(/^data:image\/svg\+xml/);
+  });
+
+  test('replaces APNG served with a .png extension (fail-open probe)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-apng';
+      img.src = base + '/fixtures/apng-test.png';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-apng')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+  });
+
+  test('static .png stays visible during the fail-open probe (no hide, no pop-in)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    const visibilityAtInsert = await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-plain-png';
+      img.src = base + '/fixtures/static.png';
+      document.body.appendChild(img);
+      window.__still.processImage(img);
+      // Synchronously after processImage — probe still in flight.
+      return getComputedStyle(img).visibility;
+    }, baseURL);
+    expect(visibilityAtInsert).toBe('visible');
+    await page.waitForFunction(
+      () => document.getElementById('img-plain-png')?.dataset.still === 'checked',
+      { timeout: 5000 }
+    );
+    const src = await page.$eval('#img-plain-png', (el) => el.src);
+    expect(src).toMatch(/static\.png$/);
+  });
+
+  test('replaces SVG-in-<img> containing SMIL animation; leaves static SVG alone', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const anim = document.createElement('img');
+      anim.id = 'img-smil-svg';
+      anim.src = base + '/fixtures/animated-smil.svg';
+      document.body.appendChild(anim);
+      const still = document.createElement('img');
+      still.id = 'img-static-svg';
+      still.src = base + '/fixtures/static-icon.svg';
+      document.body.appendChild(still);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-smil-svg')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    await page.waitForFunction(
+      () => document.getElementById('img-static-svg')?.dataset.still === 'checked',
+      { timeout: 5000 }
+    );
+    const staticSrc = await page.$eval('#img-static-svg', (el) => el.src);
+    expect(staticSrc).toMatch(/static-icon\.svg$/);
+  });
+
+  test('animated AVIF detection: avis brand → animated, avif brand → static', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    const result = await page.evaluate(() => {
+      const ftyp = (brand) => {
+        // [size:4]['ftyp'][major:4][minor:4][compatible...]
+        const head = [0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70];
+        const bytes = head.concat(
+          Array.from(brand, (c) => c.charCodeAt(0)),
+          [0, 0, 0, 0],
+          Array.from('mif1', (c) => c.charCodeAt(0))
+        );
+        return new Uint8Array(bytes);
+      };
+      return {
+        animated: window.__still.isAnimatedAVIFBuffer(ftyp('avis')),
+        still: window.__still.isAnimatedAVIFBuffer(ftyp('avif')),
+      };
+    });
+    expect(result.animated).toBe(true);
+    expect(result.still).toBe(false);
+  });
+
+  test('probe results are memoized per URL (one Range fetch for N repeated images)', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      for (let i = 0; i < 5; i++) {
+        const img = document.createElement('img');
+        img.id = 'img-counted-webp-' + i;
+        img.src = base + '/counted.webp';
+        document.body.appendChild(img);
+      }
+    }, baseURL);
+    await page.waitForFunction(() => {
+      for (let i = 0; i < 5; i++) {
+        if (document.getElementById('img-counted-webp-' + i)?.dataset.still !== 'static') return false;
+      }
+      return true;
+    }, { timeout: 5000 });
+    expect(global.__webpProbeCount).toBe(1);
+  });
+
+  test('videos: re-paused unless playback was user-initiated', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    const result = await page.evaluate(() => {
+      const spy = (v) => {
+        v.__pauseCalls = 0;
+        const orig = v.pause.bind(v);
+        v.pause = () => { v.__pauseCalls++; return orig(); };
+        return v;
+      };
+      const autoplayV = spy(document.createElement('video'));
+      const userV = spy(document.createElement('video'));
+      userV.setAttribute('data-still-user-play', '');
+      document.body.appendChild(autoplayV);
+      document.body.appendChild(userV);
+      window.__still.pauseVideos();
+      window.__still.pauseVideos(); // second scan — autoplay video re-paused
+      return { autoplay: autoplayV.__pauseCalls, user: userV.__pauseCalls };
+    });
+    expect(result.autoplay).toBeGreaterThanOrEqual(2);
+    expect(result.user).toBe(0);
+  });
+
+  // --- smoothness branch coverage ---
+
+  test('replacement preserves the layout box (no reflow to placeholder intrinsic size)', async ({ page }) => {
+    // The placeholder SVG is 100×100 intrinsic. An intrinsically-sized image
+    // (no width/height attrs, no CSS sizing) must NOT collapse to 100×100 on
+    // replacement — that reflows everything below it mid-scroll (giphy
+    // masonry jumps). freezeDimensions pins the pre-swap box via attrs.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-intrinsic-gif';
+      img.src = base + '/fixtures/test-slow.gif'; // 200×200 natural
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-intrinsic-gif')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    const box = await page.$eval('#img-intrinsic-gif', (el) => ({
+      w: el.offsetWidth, h: el.offsetHeight,
+      attrW: el.getAttribute('width'), attrH: el.getAttribute('height'),
+    }));
+    expect(box.attrW).toBe('200');
+    expect(box.attrH).toBe('200');
+    expect(box.w).toBe(200);
+    expect(box.h).toBe(200);
+  });
+
+  test('SVG settling: no-op geometry writes do not re-hide (React/D3 re-render pattern)', async ({ page }) => {
+    const fsmod = require('fs');
+    const mainWorldPatchJs = fsmod.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${mainWorldPatchJs}</script>
+      <body>
+        <svg width="100" height="100"><rect id="r" width="40" height="40"></rect></svg>
+      </body>
+    `);
+    const result = await page.evaluate(async () => {
+      const r = document.getElementById('r');
+      const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+      // Real change → must mark settling.
+      r.setAttribute('transform', 'translate(5,5)');
+      const afterChange = r.hasAttribute('data-still-svg-settling');
+      await sleep(400); // settle window is 300ms
+      const afterSettle = r.hasAttribute('data-still-svg-settling');
+      // Identical re-write (React commit replaying props) → must NOT re-hide.
+      r.setAttribute('transform', 'translate(5,5)');
+      const afterNoop = r.hasAttribute('data-still-svg-settling');
+      // Different value → animation-like, must re-mark.
+      r.setAttribute('transform', 'translate(9,9)');
+      const afterRealChange = r.hasAttribute('data-still-svg-settling');
+      return { afterChange, afterSettle, afterNoop, afterRealChange };
+    });
+    expect(result.afterChange).toBe(true);
+    expect(result.afterSettle).toBe(false);
+    expect(result.afterNoop).toBe(false);
+    expect(result.afterRealChange).toBe(true);
+  });
+
+  test('probe reads only the response prefix when the server ignores Range', async ({ page }) => {
+    // /big.webp: VP8X (anim flag clear) + an ANMF marker at ~50KB, served as
+    // 200 with the full body. Reading the whole body would misclassify it
+    // animated via the ANMF fallback scan; the truncated reader stays within
+    // the 4KB window and classifies static.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-big-webp';
+      img.src = base + '/big.webp';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-big-webp')?.dataset.still === 'static',
+      { timeout: 5000 }
+    );
+  });
+
+  test('videos: play shortly after a real user gesture is marked user-initiated', async ({ page }) => {
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate(() => {
+      const v = document.createElement('video');
+      v.id = 'gesture-video';
+      document.body.appendChild(v);
+    });
+    // Real (trusted) user gesture, then a play event on the video.
+    await page.mouse.click(10, 10);
+    const marked = await page.evaluate(() => {
+      const v = document.getElementById('gesture-video');
+      v.dispatchEvent(new Event('play'));
+      return v.hasAttribute('data-still-user-play');
+    });
+    expect(marked).toBe(true);
   });
 });

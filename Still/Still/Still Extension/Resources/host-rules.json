@@ -1,5 +1,11 @@
 {
   "president.mit.edu": [
     ".curtain-bar { left: 100% !important; }"
+  ],
+  "giphy.com": [
+    "img.giphy-gif-img { background-color: #e8e8e8 !important; }"
+  ],
+  "www.giphy.com": [
+    "img.giphy-gif-img { background-color: #e8e8e8 !important; }"
   ]
 }

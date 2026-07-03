@@ -85,10 +85,14 @@ function setupWebRequestInterceptor() {
     if (!contentType) return;
 
     const ct = contentType.value.toLowerCase();
-    const isAnimated = ct.includes('image/gif') ||
-                       ct.includes('image/webp') ||
-                       ct.includes('image/apng');
-    if (!isAnimated) return;
+    // ONLY image/gif is definitively animated from headers alone. WebP/APNG
+    // content-types are usually static: CDNs serve .jpg URLs as image/webp
+    // via content negotiation (nytimes' `auto=webp` flagged EVERY photo on
+    // the site and replaced it with the placeholder — user report
+    // 2026-07-01, the day the webRequest permission first activated this
+    // handler). Animated-or-not for webp/apng needs byte inspection, which
+    // the content script's probe paths (D/E) already perform.
+    if (!ct.includes('image/gif')) return;
 
     // Skip if URL already has a known animated extension (content script handles those)
     const ANIMATED_EXT_RE = /\.(gif|webp|apng)(\?|$)/i;

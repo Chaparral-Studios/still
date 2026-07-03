@@ -102,7 +102,7 @@ case "$MODE" in
     run_variant "none"    --no-scroll --png-capture
     run_variant "current" --no-scroll --png-capture --ext "$REPO_ROOT/web-extension"
     ;;
-  flicker-real|flicker-scroll)
+  flicker-real|flicker-scroll|flicker-updown)
     # True-compositor 60fps capture via AVFoundation, for a Chrome window
     # running on a BetterDisplay virtual display (no photons anywhere).
     # Requires env vars: AV_INDEX, WINDOW_X, WINDOW_Y (see list-displays.sh).
@@ -113,6 +113,7 @@ case "$MODE" in
     : "${WINDOW_Y:?WINDOW_Y required}"
     scroll_flag=""
     [ "$MODE" = "flicker-scroll" ] && scroll_flag="--scroll-then-sit"
+    [ "$MODE" = "flicker-updown" ] && scroll_flag="--scroll-updown"
     for name in none current; do
       ext_args=""
       [ "$name" = "current" ] && ext_args="--ext $REPO_ROOT/web-extension"

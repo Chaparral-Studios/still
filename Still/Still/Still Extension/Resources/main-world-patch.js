@@ -59,15 +59,23 @@
     svgSettleTimers.set(el, t);
   }
 
+  // No-op writes are skipped: React/Vue re-renders re-apply IDENTICAL attr
+  // values on every commit, and D3 writes static `transform`s on every <g>.
+  // Marking those hid entire charts/icons for 300ms per render pass —
+  // scroll-triggered re-renders (sticky headers, virtualized lists) made
+  // whole widgets blink in and out while scrolling. Only a write that
+  // actually CHANGES geometry indicates animation.
   Element.prototype.setAttribute = function (name, value) {
-    if (this instanceof SVGElement && GEOM_ATTRS.has(name)) {
+    if (this instanceof SVGElement && GEOM_ATTRS.has(name) &&
+        this.getAttribute(name) !== String(value)) {
       markSettling(this);
     }
     return origSetAttribute.apply(this, arguments);
   };
 
   Element.prototype.setAttributeNS = function (ns, name, value) {
-    if (this instanceof SVGElement && GEOM_ATTRS.has(name)) {
+    if (this instanceof SVGElement && GEOM_ATTRS.has(name) &&
+        this.getAttributeNS(ns, name) !== String(value)) {
       markSettling(this);
     }
     return origSetAttributeNS.apply(this, arguments);
@@ -154,6 +162,17 @@
       } catch (e) {}
       return Promise.resolve();
     }
+    // Record user-initiated playback so the content script's re-pause pass
+    // leaves this video alone (it re-pauses autoplaying videos on every scan;
+    // without this mark it kept pausing YouTube mid-watch).
+    // userActivation.isActive is the TRANSIENT bit — true only briefly after
+    // a real gesture — so script-driven autoplay retries don't qualify.
+    try {
+      if (typeof navigator !== 'undefined' && navigator.userActivation &&
+          navigator.userActivation.isActive && this.setAttribute) {
+        this.setAttribute('data-still-user-play', '');
+      }
+    } catch (e) {}
     return origMediaPlay.apply(this, arguments);
   };
 })();
