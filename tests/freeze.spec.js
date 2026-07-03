@@ -91,6 +91,24 @@ function createHandler(corsOrigin) {
       return;
     }
 
+    // Large static WebP whose ONLY 'ANMF' byte-sequence sits far beyond the
+    // 4KB probe window, served as 200 (Range ignored). A probe that buffers
+    // the whole body would hit the ANMF fallback scan and misclassify it as
+    // animated; a prefix-truncated read classifies it static. Regression
+    // guard for readFirstBytes.
+    if (urlPath === '/big.webp') {
+      const head = Buffer.concat([
+        Buffer.from('RIFF'), Buffer.from([0, 0, 1, 0]), Buffer.from('WEBP'),
+        Buffer.from('VP8X'), Buffer.from([10, 0, 0, 0]),
+        Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // anim flag clear
+      ]);
+      const junk = Buffer.alloc(60000, 7);
+      Buffer.from('ANMF').copy(junk, 50000);
+      res.writeHead(200, { 'Content-Type': 'image/webp' });
+      res.end(Buffer.concat([head, junk]));
+      return;
+    }
+
     // Static WebP route that counts probe requests (Range header) — verifies
     // per-URL probe memoization. Minimal RIFF/WEBP container: enough for the
     // byte inspector (no VP8X anim flag, no ANMF chunk → static verdict).
@@ -1747,6 +1765,88 @@ test.describe('Still — block and replace logic', () => {
     });
     expect(result.autoplay).toBeGreaterThanOrEqual(2);
     expect(result.user).toBe(0);
+  });
+
+  // --- smoothness branch coverage ---
+
+  test('replacement preserves the layout box (no reflow to placeholder intrinsic size)', async ({ page }) => {
+    // The placeholder SVG is 100×100 intrinsic. An intrinsically-sized image
+    // (no width/height attrs, no CSS sizing) must NOT collapse to 100×100 on
+    // replacement — that reflows everything below it mid-scroll (giphy
+    // masonry jumps). freezeDimensions pins the pre-swap box via attrs.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-intrinsic-gif';
+      img.src = base + '/fixtures/test-slow.gif'; // 200×200 natural
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-intrinsic-gif')?.dataset.still === 'replaced',
+      { timeout: 5000 }
+    );
+    const box = await page.$eval('#img-intrinsic-gif', (el) => ({
+      w: el.offsetWidth, h: el.offsetHeight,
+      attrW: el.getAttribute('width'), attrH: el.getAttribute('height'),
+    }));
+    expect(box.attrW).toBe('200');
+    expect(box.attrH).toBe('200');
+    expect(box.w).toBe(200);
+    expect(box.h).toBe(200);
+  });
+
+  test('SVG settling: no-op geometry writes do not re-hide (React/D3 re-render pattern)', async ({ page }) => {
+    const fsmod = require('fs');
+    const mainWorldPatchJs = fsmod.readFileSync(MAIN_WORLD_PATCH, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>${mainWorldPatchJs}</script>
+      <body>
+        <svg width="100" height="100"><rect id="r" width="40" height="40"></rect></svg>
+      </body>
+    `);
+    const result = await page.evaluate(async () => {
+      const r = document.getElementById('r');
+      const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+      // Real change → must mark settling.
+      r.setAttribute('transform', 'translate(5,5)');
+      const afterChange = r.hasAttribute('data-still-svg-settling');
+      await sleep(400); // settle window is 300ms
+      const afterSettle = r.hasAttribute('data-still-svg-settling');
+      // Identical re-write (React commit replaying props) → must NOT re-hide.
+      r.setAttribute('transform', 'translate(5,5)');
+      const afterNoop = r.hasAttribute('data-still-svg-settling');
+      // Different value → animation-like, must re-mark.
+      r.setAttribute('transform', 'translate(9,9)');
+      const afterRealChange = r.hasAttribute('data-still-svg-settling');
+      return { afterChange, afterSettle, afterNoop, afterRealChange };
+    });
+    expect(result.afterChange).toBe(true);
+    expect(result.afterSettle).toBe(false);
+    expect(result.afterNoop).toBe(false);
+    expect(result.afterRealChange).toBe(true);
+  });
+
+  test('probe reads only the response prefix when the server ignores Range', async ({ page }) => {
+    // /big.webp: VP8X (anim flag clear) + an ANMF marker at ~50KB, served as
+    // 200 with the full body. Reading the whole body would misclassify it
+    // animated via the ANMF fallback scan; the truncated reader stays within
+    // the 4KB window and classifies static.
+    await injectContentScript(page);
+    await page.goto(baseURL + '/test-page.html');
+    await page.addScriptTag({ path: CONTENT_SCRIPT });
+    await page.evaluate((base) => {
+      const img = document.createElement('img');
+      img.id = 'img-big-webp';
+      img.src = base + '/big.webp';
+      document.body.appendChild(img);
+    }, baseURL);
+    await page.waitForFunction(
+      () => document.getElementById('img-big-webp')?.dataset.still === 'static',
+      { timeout: 5000 }
+    );
   });
 
   test('videos: play shortly after a real user gesture is marked user-initiated', async ({ page }) => {

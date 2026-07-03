@@ -59,15 +59,23 @@
     svgSettleTimers.set(el, t);
   }
 
+  // No-op writes are skipped: React/Vue re-renders re-apply IDENTICAL attr
+  // values on every commit, and D3 writes static `transform`s on every <g>.
+  // Marking those hid entire charts/icons for 300ms per render pass —
+  // scroll-triggered re-renders (sticky headers, virtualized lists) made
+  // whole widgets blink in and out while scrolling. Only a write that
+  // actually CHANGES geometry indicates animation.
   Element.prototype.setAttribute = function (name, value) {
-    if (this instanceof SVGElement && GEOM_ATTRS.has(name)) {
+    if (this instanceof SVGElement && GEOM_ATTRS.has(name) &&
+        this.getAttribute(name) !== String(value)) {
       markSettling(this);
     }
     return origSetAttribute.apply(this, arguments);
   };
 
   Element.prototype.setAttributeNS = function (ns, name, value) {
-    if (this instanceof SVGElement && GEOM_ATTRS.has(name)) {
+    if (this instanceof SVGElement && GEOM_ATTRS.has(name) &&
+        this.getAttributeNS(ns, name) !== String(value)) {
       markSettling(this);
     }
     return origSetAttributeNS.apply(this, arguments);
