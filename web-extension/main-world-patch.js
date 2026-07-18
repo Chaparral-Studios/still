@@ -180,122 +180,155 @@
   // Canvas animations (WebGL shaders, 2D particle fields, worker/OffscreenCanvas
   // renders) are invisible to every other Still defense: they're not <img>,
   // <video>, SVG, CSS animation, or attribute mutation. We detect a canvas that
-  // keeps repainting across animation frames and freeze it; one-shot/static
-  // canvases (charts, a single WebGL scene) draw in a frame or two and are never
-  // touched. Motion is the signal, not the element.
+  // keeps repainting — a SUSTAINED run of paints, not the mere existence of
+  // draws — and freeze it; one-shot/static canvases (charts, a single WebGL
+  // scene, occasional redraws on resize/theme-toggle) are never touched.
+  // Motion is the signal, not the element.
   //
   // Split across worlds like the rest of Still. This main-world code owns the
   // prototype hooks — getContext, the context's draw methods,
   // transferControlToOffscreen, and Worker.postMessage all execute in the page
-  // world — and applies the freeze directly. The isolated content.js watches
-  // the `data-still-canvas` attribute to count the freeze on the badge, and
-  // signals disable/allowlist to us via a `data-still-off` attribute on <html>.
+  // world — and applies the freeze directly. The isolated content.js counts
+  // freezes on the badge via the `data-still-canvas` attribute, and owns the
+  // `data-still-off` disable/allowlist signal on <html>. That attribute is
+  // page-visible, so content.js also DEFENDS it: foreign writes are reverted
+  // from the isolated world, which the page cannot reach.
   (function () {
-    var MIN_SIZE = 96;          // ignore small canvases (icon glyphs, sparklines)
-    var FRAME_THRESHOLD = 3;    // distinct animation frames with draws => animating
-    var TIME_MS = 400;          // ...or draws still arriving this long after the first
-    var TIME_DRAWS = 8;         // ...with at least this many, to catch setTimeout loops
-    var WORKER_CHECK_MS = 600;  // delay before judging a worker/offscreen canvas
+    var MIN_SIZE = 96;         // ignore small canvases (icon glyphs, sparklines)
+    var FRAME_THRESHOLD = 3;   // paint-bursts in ONE run => animating (main thread)
+    var TICK_THRESHOLD = 6;    // spaced postMessages in one run => animating
+                               // (worker path; stricter so a short init
+                               // handshake of 2-3 messages never trips it)
+    var FRAME_GAP_MS = 5;      // draws closer together than this are one frame
+    var RUN_RESET_MS = 300;    // silence longer than this starts a NEW run —
+                               // unrelated one-shot redraws (load, resize,
+                               // dark-mode toggle) minutes apart never
+                               // accumulate into a false "animating"
+    var TIME_MS = 400;         // ...or many draws still arriving this long into a run
+    var TIME_DRAWS = 8;
+    var ATTEMPT_MS = 250;      // min spacing of freeze-eligibility checks
+                               // (sizeOK reads clientWidth = forced layout;
+                               // never do that at draw-call rate)
+
+    var origRAF = typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame.bind(window) : null;
 
     function now() { try { return performance.now(); } catch (e) { return Date.now(); } }
     function stillOff() {
       try { var de = document.documentElement; return !!(de && de.hasAttribute('data-still-off')); }
       catch (e) { return false; }
     }
+    // Layout size only, and the canvas must be in the document. A detached or
+    // display:none canvas paints no pixels (no motion harm) and is commonly a
+    // processing surface (video-frame analysis, thumbnailing) whose draws must
+    // keep working — the first version's width-attribute fallback froze those.
+    // If a hidden canvas is attached/shown later while still animating, the
+    // classifier (which keeps evaluating) freezes it then.
     function sizeOK(canvas) {
-      var w = canvas.clientWidth || canvas.width || 0;
-      var h = canvas.clientHeight || canvas.height || 0;
-      return w >= MIN_SIZE && h >= MIN_SIZE;
-    }
-
-    // The timestamp rAF passes every callback is identical within a frame and
-    // changes between frames — so it's a free per-frame id. Draws sharing a ts
-    // are one frame; a draw at a new ts is a new frame. That's how we tell
-    // "repaints every frame" (animating) from "drew once and stopped" (static).
-    var frameTs = 0;
-    var origRAF = window.requestAnimationFrame;
-    if (typeof origRAF === 'function') {
-      try {
-        window.requestAnimationFrame = function (cb) {
-          return origRAF.call(window, function (t) { frameTs = t; return cb(t); });
-        };
-      } catch (e) {}
+      if (!canvas.isConnected) return false;
+      return canvas.clientWidth >= MIN_SIZE && canvas.clientHeight >= MIN_SIZE;
     }
 
     var trackers = new WeakMap();   // canvas -> tracker
-    var wrappedCtx = new WeakSet();  // contexts whose draw methods we've wrapped
-    var frozen = new Set();          // frozen source canvases (live refs, for unfreeze)
+    var wrappedCtx = new WeakSet(); // contexts whose draw methods we've wrapped
+    var trackedCount = 0;           // lets input listeners early-out on canvas-free pages
 
     function getTracker(canvas) {
       var tr = trackers.get(canvas);
       if (!tr) {
-        tr = { frames: 0, lastTs: -1, count: 0, first: 0, last: 0,
-               frozen: false, noop: false, kind: null };
+        tr = { frames: 0, count: 0, first: 0, lastDraw: 0, attemptAt: 0,
+               frozen: false, noop: false };
         trackers.set(canvas, tr);
+        trackedCount++;
       }
       return tr;
     }
 
-    // Interaction exemption: a canvas the user points at, scrolls on, or types
-    // into is an app (game, map, drawing tool, WebGL viewer, video-call) — never
-    // freeze it, and undo the freeze if we already applied one. Mirrors the
-    // user-initiated-video exemption.
+    // Interaction exemption: a canvas the user CLICKS or TYPES into is an app
+    // (game, map, drawing tool) — never freeze it, and undo an earlier freeze.
+    // 'click'/'keydown' only — deliberately NOT wheel/touchstart/pointerdown:
+    // scroll gestures target whatever sits under the pointer, so for a
+    // full-viewport background canvas (the exact case this feature exists for)
+    // wheel/touch-scroll would permanently unfreeze the animation the user
+    // installed Still to stop. A touch that becomes a scroll never fires
+    // 'click', and 'keydown' only reaches a canvas that holds focus — both
+    // express intent to use the canvas, not to pass by it.
     function markInteracted(target) {
-      var el = target;
-      while (el && el.nodeType === 1 && el !== document.documentElement) {
-        if (el.tagName === 'CANVAS') {
-          el.__stillUserCanvas = true;
-          var tr = trackers.get(el);
-          if (tr && tr.frozen) unfreeze(el, tr);
-          return;
-        }
-        el = el.parentNode;
-      }
+      if (!trackedCount) return;
+      var el = target && target.nodeType === 1 ? target : null;
+      var canvas = el && el.closest ? el.closest('canvas') : null;
+      if (!canvas) return;
+      canvas.__stillUserCanvas = true;
+      var tr = trackers.get(canvas);
+      if (tr && tr.frozen) unfreeze(canvas, tr);
     }
-    ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function (t) {
+    ['click', 'keydown'].forEach(function (t) {
       try {
         document.addEventListener(t, function (e) { markInteracted(e.target); },
           { capture: true, passive: true });
       } catch (e) {}
     });
 
-    function onDraw(canvas) {
-      var tr = trackers.get(canvas);
-      if (!tr || tr.frozen || canvas.__stillUserCanvas) return;
+    // Shared classifier for draw calls (main thread) and worker frame-ticks.
+    // Frames are derived from time gaps — no rAF wrapping needed: paints
+    // closer than FRAME_GAP_MS are one visual frame, and RUN_RESET_MS of
+    // silence resets the run, so only a sustained sequence of frames counts.
+    function classify(canvas, tr, threshold) {
+      if (tr.frozen || canvas.__stillUserCanvas) return false;
       var t = now();
+      if (tr.lastDraw && t - tr.lastDraw > RUN_RESET_MS) {
+        tr.frames = 0; tr.count = 0; tr.first = 0;
+      }
       if (!tr.first) tr.first = t;
-      tr.last = t;
+      if (!tr.lastDraw || t - tr.lastDraw > FRAME_GAP_MS) tr.frames++;
+      tr.lastDraw = t;
       tr.count++;
-      if (frameTs !== tr.lastTs) { tr.lastTs = frameTs; tr.frames++; }
-      if (tr.frames >= FRAME_THRESHOLD ||
-          (tr.count >= TIME_DRAWS && (tr.last - tr.first) > TIME_MS)) {
-        freezeMainThread(canvas, tr);
+      return tr.frames >= threshold ||
+             (tr.count >= TIME_DRAWS && t - tr.first > TIME_MS);
+    }
+
+    function tryFreeze(canvas, tr, worker) {
+      // Eligibility is re-checked (throttled) every time the classifier says
+      // "animating": a canvas that is too small / hidden / disabled NOW gets
+      // frozen later if it becomes eligible while still animating. The first
+      // version's one-shot decisions left late-shown canvases animating
+      // forever and re-enabled sites unprotected.
+      var t = now();
+      if (t - tr.attemptAt < ATTEMPT_MS) return;
+      tr.attemptAt = t;
+      if (stillOff() || !sizeOK(canvas)) return;
+      tr.frozen = true;
+      if (worker) {
+        // Can't snapshot or no-op a transferred canvas (the page world can't
+        // reach the worker's context) — hide it. Hiding alone guarantees no
+        // motion reaches the screen, whatever the worker keeps rendering.
+        try { canvas.style.setProperty('visibility', 'hidden', 'important'); } catch (e) {}
+        try { canvas.setAttribute('data-still-canvas', 'frozen-worker'); } catch (e) {}
+      } else {
+        // Zero-DOM freeze: swallow draws from the NEXT frame boundary on. The
+        // 2D bitmap / GL drawing buffer (preserved via getContext below) then
+        // holds the last COMPLETE frame. Engaging mid-frame froze clear-then-
+        // draw loops as a blank canvas — the clear ran, the scene draws were
+        // swallowed. One extra frame of animation is the price of never
+        // freezing a torn or blank image.
+        var engage = function () { if (tr.frozen) tr.noop = true; };
+        if (origRAF) origRAF(engage); else setTimeout(engage, 0);
+        try { canvas.setAttribute('data-still-canvas', 'frozen'); } catch (e) {}
       }
     }
 
-    function freezeMainThread(canvas, tr) {
-      if (tr.frozen || canvas.__stillUserCanvas || stillOff() || !sizeOK(canvas)) return;
-      tr.frozen = true;
-      tr.noop = true;           // draw wrappers now swallow calls => the loop stops painting
-      tr.kind = 'main';
-      frozen.add(canvas);
-      try { canvas.setAttribute('data-still-canvas', 'frozen'); } catch (e) {}
-      // No overlay, no DOM surgery: a 2D canvas keeps its last bitmap, and a
-      // WebGL canvas keeps its last frame because we forced preserveDrawingBuffer
-      // at getContext (see below). So no-op'ing further draws leaves the final
-      // frame frozen on screen — and stops wasted GPU work.
-    }
-
+    // One unfreeze for both freeze kinds — the visibility removal is a no-op
+    // for main-thread freezes and the counter reset is harmless for worker
+    // ones. (The first version had two hand-copied paths; they drifted.)
     function unfreeze(canvas, tr) {
       tr.frozen = false; tr.noop = false;
-      tr.frames = 0; tr.lastTs = -1; tr.count = 0; tr.first = 0; tr.last = 0;
-      frozen.delete(canvas);
+      tr.frames = 0; tr.count = 0; tr.first = 0; tr.lastDraw = 0;
       try { canvas.style.removeProperty('visibility'); } catch (e) {}
       try { canvas.removeAttribute('data-still-canvas'); } catch (e) {}
     }
 
-    // Draw entry points. Wrapping these reports paints to onDraw and, once
-    // frozen, makes them no-ops (freeze the frame + halt the render loop's work).
+    // Draw entry points. Wrapping these feeds the classifier and, once frozen,
+    // swallows the calls (freeze the frame + stop wasted paint work).
     var GL_DRAWS = ['drawArrays', 'drawElements', 'drawArraysInstanced',
                     'drawElementsInstanced', 'drawRangeElements', 'clear', 'clearBufferfv'];
     var CTX2D_DRAWS = ['drawImage', 'fill', 'stroke', 'fillRect', 'clearRect',
@@ -304,15 +337,18 @@
     function wrapDraws(ctx, canvas, names) {
       if (wrappedCtx.has(ctx)) return;
       wrappedCtx.add(ctx);
+      var tr = getTracker(canvas);   // closed over: no per-draw WeakMap lookups
       names.forEach(function (m) {
         var orig = ctx[m];
         if (typeof orig !== 'function') return;
         try {
           ctx[m] = function () {
-            var tr = trackers.get(canvas);
-            if (tr && tr.noop) return undefined;   // frozen: swallow the draw
-            onDraw(canvas);
-            return orig.apply(ctx, arguments);
+            if (tr.noop) return undefined;   // frozen: swallow the draw
+            if (classify(canvas, tr, FRAME_THRESHOLD)) tryFreeze(canvas, tr, false);
+            // `this`, not the closed-over ctx: a borrowed method call
+            // (ctx.drawImage.call(other, ...)) keeps native receiver
+            // semantics instead of silently painting the wrong canvas.
+            return orig.apply(this, arguments);
           };
         } catch (e) {}
       });
@@ -322,23 +358,29 @@
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {
       var t = String(type);
       var isGL = /webgl/i.test(t);
-      var callAttrs = attrs;
-      // Force preserveDrawingBuffer for WebGL so a frozen (no-op'd) canvas keeps
-      // showing its last frame instead of clearing to blank on the next
-      // composite. Modest cost; it's what makes the zero-DOM freeze work for GL.
-      if (isGL) {
+      var ctx;
+      // Force preserveDrawingBuffer for WebGL so a frozen (no-op'd) canvas
+      // keeps its last frame instead of losing the buffer after compositing.
+      // Applied whether or not the page passed attrs (the first version keyed
+      // on arguments.length and silently skipped the common no-attrs call,
+      // defeating its own mechanism), but NOT when Still is off for the site.
+      // Known cost: apps that legally rely on the implicit post-composite
+      // clear may accumulate frames — but those repaint continuously and
+      // would be frozen here anyway.
+      if (isGL && !stillOff()) {
+        var callAttrs = {};
         try {
-          callAttrs = {};
           if (attrs && typeof attrs === 'object') { for (var k in attrs) callAttrs[k] = attrs[k]; }
-          callAttrs.preserveDrawingBuffer = true;
-        } catch (e) { callAttrs = attrs; }
+        } catch (e) {}
+        callAttrs.preserveDrawingBuffer = true;
+        ctx = origGetContext.call(this, type, callAttrs);
+      } else {
+        ctx = arguments.length > 1
+          ? origGetContext.call(this, type, attrs)
+          : origGetContext.call(this, type);
       }
-      var ctx = arguments.length > 1
-        ? origGetContext.call(this, type, callAttrs)
-        : origGetContext.call(this, type);
       try {
         if (ctx && (isGL || t === '2d')) {
-          getTracker(this);
           wrapDraws(ctx, this, isGL ? GL_DRAWS : CTX2D_DRAWS);
         }
       } catch (e) {}
@@ -347,44 +389,31 @@
 
     // --- Worker / OffscreenCanvas case ---
     // Rendering moves into a Worker: canvas.transferControlToOffscreen() ->
-    // worker.postMessage(offscreen). The page world can't reach the worker's GL
-    // context or read the canvas back, so there's no draw to count, no snapshot,
-    // and no draw to no-op. Policy: an offscreen-transferred canvas that ends up
-    // visibly sized is a continuous renderer (nobody spins up a worker to draw a
-    // static image once). Freeze it by (1) hiding the live canvas — a guaranteed
-    // motion-stop whether the loop is main-driven or worker-self-driven — and
-    // (2) cutting the frame feed by suppressing postMessage to its render worker
-    // (kill the loop, per the chosen aggressiveness, not just hide it).
+    // worker.postMessage(offscreen, [offscreen]). The page world can't reach
+    // the worker's context, so there are no draw calls to count. The evidence
+    // channel is the frame FEED instead: main-driven render loops post a
+    // message to the worker every tick. Those go through the same classifier
+    // (stricter threshold — an init handshake is 2-3 messages, a render loop
+    // is a sustained stream), and a sustained tick run freezes the canvas by
+    // hiding it. Messages are always DELIVERED, never suppressed: the first
+    // version dropped ALL traffic to the render worker, which silently broke
+    // pages that multiplex rendering with data/RPC on one worker — and the
+    // dropped messages were unrecoverable after unfreezing. Hiding the canvas
+    // already guarantees zero motion; killing the program was overreach.
+    // Known gap, accepted: a fully worker-self-driven loop (worker-side rAF,
+    // zero main-thread ticks) produces no observable evidence — hiding on no
+    // evidence hid real static content (offscreen-rendered charts), which is
+    // worse than missing the rare self-driving case.
     var offscreenSource = new WeakMap();   // OffscreenCanvas -> source <canvas>
-    var canvasWorker = new WeakMap();      // source <canvas> -> its render Worker
-    var suppressedWorkers = new WeakSet();
+    var workerCanvas = new WeakMap();      // Worker -> the source <canvas> it renders
 
     var origTransfer = HTMLCanvasElement.prototype.transferControlToOffscreen;
     if (typeof origTransfer === 'function') {
       HTMLCanvasElement.prototype.transferControlToOffscreen = function () {
         var off = origTransfer.apply(this, arguments);
-        try {
-          offscreenSource.set(off, this);
-          getTracker(this).kind = 'worker';
-          this.setAttribute('data-still-canvas', 'worker');
-          var canvas = this;
-          setTimeout(function () { maybeFreezeWorkerCanvas(canvas); }, WORKER_CHECK_MS);
-        } catch (e) {}
+        try { offscreenSource.set(off, this); getTracker(this); } catch (e) {}
         return off;
       };
-    }
-
-    function maybeFreezeWorkerCanvas(canvas) {
-      var tr = getTracker(canvas);
-      if (tr.frozen || canvas.__stillUserCanvas || stillOff() || !sizeOK(canvas)) return;
-      tr.frozen = true; tr.kind = 'worker';
-      frozen.add(canvas);
-      try { canvas.setAttribute('data-still-canvas', 'frozen-worker'); } catch (e) {}
-      var w = canvasWorker.get(canvas);
-      if (w) suppressedWorkers.add(w);   // cut the frame feed to the render worker
-      // Can't snapshot a transferred canvas, so there's no frozen frame to show;
-      // hide it (mirrors how blocked image-substitute videos are removed).
-      try { canvas.style.setProperty('visibility', 'hidden', 'important'); } catch (e) {}
     }
 
     if (typeof Worker !== 'undefined' && Worker.prototype && Worker.prototype.postMessage) {
@@ -397,44 +426,58 @@
           if (transfer) {
             for (var i = 0; i < transfer.length; i++) {
               var src = offscreenSource.get(transfer[i]);
-              if (src) canvasWorker.set(src, this);
+              if (src) workerCanvas.set(this, src);
             }
           }
-          if (msg && offscreenSource.get(msg)) canvasWorker.set(offscreenSource.get(msg), this);
+          var canvas = workerCanvas.get(this);
+          if (canvas) {
+            var tr = getTracker(canvas);
+            if (classify(canvas, tr, TICK_THRESHOLD)) tryFreeze(canvas, tr, true);
+          }
         } catch (e) {}
-        if (suppressedWorkers.has(this)) return undefined;   // frozen: drop frame ticks
         return origPost.apply(this, arguments);
       };
     }
 
     // Undo every freeze when content.js signals disabled/allowlisted (it sets
-    // data-still-off on <html> once storage resolves — which may land just after
-    // an early freeze, so this is the self-correcting path).
+    // data-still-off on <html> once storage resolves — which may land just
+    // after an early freeze, so this is the self-correcting path). Frozen
+    // canvases are found by attribute, not held in a Set: the first version's
+    // strong Set retained SPA-discarded canvases (and their GL buffers) for
+    // the page lifetime.
     function unfreezeAll() {
-      frozen.forEach(function (canvas) {
-        var tr = trackers.get(canvas);
-        if (!tr) return;
-        if (tr.kind === 'worker') {
-          var w = canvasWorker.get(canvas);
-          if (w) suppressedWorkers.delete(w);
-          tr.frozen = false;
+      try {
+        document.querySelectorAll('canvas[data-still-canvas]').forEach(function (canvas) {
+          var tr = trackers.get(canvas);
+          if (tr) { unfreeze(canvas, tr); return; }
           try { canvas.style.removeProperty('visibility'); } catch (e) {}
           try { canvas.removeAttribute('data-still-canvas'); } catch (e) {}
-        } else {
-          unfreeze(canvas, tr);
-        }
-      });
-      frozen.clear();
+        });
+      } catch (e) {}
     }
-    try {
-      new MutationObserver(function () { if (stillOff()) unfreezeAll(); })
-        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off'] });
-    } catch (e) {}
+    // documentElement normally exists at document_start, but not in every
+    // embedding (test harness init scripts run pre-parse; defensive for odd
+    // browser timings too) — retry the install once the DOM root exists.
+    function installOffObserver() {
+      try {
+        new MutationObserver(function () { if (stillOff()) unfreezeAll(); })
+          .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off'] });
+        return true;
+      } catch (e) { return false; }
+    }
+    if (!installOffObserver()) {
+      try {
+        document.addEventListener('DOMContentLoaded', installOffObserver, { once: true });
+      } catch (e) {}
+    }
 
     // Test hook (main world).
     try {
       window.__stillCanvas = {
-        frozenCount: function () { return frozen.size; },
+        frozenCount: function () {
+          try { return document.querySelectorAll('canvas[data-still-canvas]').length; }
+          catch (e) { return 0; }
+        },
         isFrozen: function (c) { var tr = trackers.get(c); return !!(tr && tr.frozen); },
         MIN_SIZE: MIN_SIZE, FRAME_THRESHOLD: FRAME_THRESHOLD,
       };

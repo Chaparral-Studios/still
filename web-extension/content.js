@@ -981,11 +981,29 @@
 
   // --- Scanning ---
 
+  // Canvas freezes are applied by main-world-patch.js; count them on the badge
+  // here (the main world can't reach extension APIs). The attribute-mutation
+  // branch of the observer catches freezes that happen live; this sweep
+  // catches ones that landed before the observer started (the main-world
+  // patch can freeze within a few frames, while our observer waits on the
+  // async storage read) or while the canvas was detached from the DOM.
+  function countFrozenCanvases() {
+    document.querySelectorAll(
+      'canvas[data-still-canvas="frozen"], canvas[data-still-canvas="frozen-worker"]'
+    ).forEach((c) => {
+      if (!c.__stillCounted) {
+        c.__stillCounted = true;
+        sendMsg({ type: 'imageFrozen' });
+      }
+    });
+  }
+
   function scanAll() {
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();
     pauseVideos();
+    countFrozenCanvases();
     // Also re-run cancelAnimations on every scan so late-arriving animations
     // (async-loaded widgets like Fidelity's SVG pie chart that kicks in after
     // the data finishes loading — well past DOMContentLoaded) get caught as
@@ -1030,6 +1048,23 @@
           }
         } else if (mutation.type === 'attributes') {
           const target = mutation.target;
+          // data-still-off (on <html>) is our disable/allowlist signal to the
+          // main-world canvas patch — but it lives in the page-visible DOM, so
+          // a page script could set it to switch canvas freezing off (or clear
+          // it to fight an allowlist). Re-assert the truth from extension
+          // state on any foreign write: the isolated world has equal DOM
+          // authority, so the page cannot win this exchange.
+          if (target === document.documentElement &&
+              mutation.attributeName === 'data-still-off') {
+            const wantOff = !enabled || siteAllowed;
+            if (wantOff !== target.hasAttribute('data-still-off')) {
+              try {
+                if (wantOff) target.setAttribute('data-still-off', '');
+                else target.removeAttribute('data-still-off');
+              } catch (e) {}
+            }
+            continue;
+          }
           // Skip already-replaced images — the lock and CSS handle them
           if (target.tagName === 'IMG' && target.dataset.still === 'replaced') {
             const descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
@@ -1090,7 +1125,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'data-still-canvas']
+      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off']
     });
 
   }
