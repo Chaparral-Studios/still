@@ -189,6 +189,15 @@
       const allowlist = result.allowlist || [];
       siteAllowed = allowlist.includes(location.hostname);
 
+      // Signal the main-world patch (canvas freezing lives there and has no
+      // storage access). Setting this on <html> makes it skip new freezes and,
+      // via its observer, undo any freeze already applied before storage
+      // resolved. Cleared when enabled so a re-enable path isn't left blocked.
+      try {
+        if (!enabled || siteAllowed) document.documentElement.setAttribute('data-still-off', '');
+        else document.documentElement.removeAttribute('data-still-off');
+      } catch (e) {}
+
       if (!enabled || siteAllowed) {
         style.remove();
         // Also drop the per-host CSS rule pack — otherwise allowlisting a
@@ -1058,6 +1067,16 @@
             const v = target.parentElement;
             if (v.dataset.stillVideo !== 'blocked' && isVideoPreviewToBlock(v)) blockVideoPreview(v);
           }
+          // A <canvas> the main-world patch has frozen (an animated WebGL/2D or
+          // worker/offscreen canvas). Count it on the badge once — the main
+          // world can't reach the extension APIs, so the tally happens here.
+          if (target.tagName === 'CANVAS' && !target.__stillCounted) {
+            const state = target.dataset.stillCanvas;
+            if (state === 'frozen' || state === 'frozen-worker') {
+              target.__stillCounted = true;
+              sendMsg({ type: 'imageFrozen' });
+            }
+          }
         }
       }
       if (needsScan) scheduleScan();
@@ -1071,7 +1090,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset']
+      attributeFilter: ['src', 'srcset', 'data-still-canvas']
     });
 
   }
