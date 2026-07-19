@@ -92,7 +92,10 @@
     // SVG path d-attribute mutation reveal animations (D3-style charts like
     // Fidelity's Goals pie chart) get hidden during their active period and
     // revealed only once `d` has stabilized — see observeMutations for the
-    // settle-tracking logic. This CSS rule is the hide mechanism.
+    // settle-tracking logic. This CSS rule is the hide mechanism for light-DOM
+    // SVG only; document CSS can't pierce shadow roots, so main-world-patch.js
+    // inline-hides settling elements inside shadow DOM (ADP's Stencil-wrapped
+    // Highcharts pie is the canonical case).
     'svg [data-still-svg-settling] {',
     '  visibility: hidden !important;',
     '}',

@@ -16,7 +16,9 @@
  * every relevant write, and a 300ms debounced timer removes it once
  * mutations stop — meaning the chart has reached its final state. A CSS
  * rule in content.js (isolated world, via <style> injection) hides
- * elements with that attribute.
+ * elements with that attribute — except inside shadow roots, where
+ * document-level CSS can't reach; those elements are hidden with inline
+ * style instead (see the shadow DOM hide path below).
  */
 (function () {
   // Marker so we can tell from outside whether this main-world script
@@ -35,6 +37,48 @@
   const origSetAttribute = Element.prototype.setAttribute;
   const origSetAttributeNS = Element.prototype.setAttributeNS;
 
+  function stillOff() {
+    try {
+      const de = document.documentElement;
+      return !!(de && de.hasAttribute('data-still-off'));
+    } catch (e) { return false; }
+  }
+
+  // --- Shadow DOM hide path ---
+  // The `data-still-svg-settling` attribute set below is hidden by a CSS rule
+  // in content.js's document-level <style> — which cannot pierce shadow roots.
+  // Chart libraries inside web components (ADP's Stencil `sdf-chart` wrapping
+  // Highcharts: the pay-statements pie sweep rewrites each slice's `d` ~150
+  // times over ~850ms) animate in exactly the same way but never match that
+  // rule. The prototype patches DO fire for shadow elements (same
+  // Element.prototype), so for elements whose root is a ShadowRoot we hide via
+  // inline style instead, restoring the prior inline value once settled.
+  const shadowHidden = new Set();       // elements currently inline-hidden
+  const shadowPrevVis = new WeakMap();  // el -> [value, priority] pre-hide
+
+  function hideShadowEl(el) {
+    if (shadowHidden.has(el)) return;
+    try {
+      shadowPrevVis.set(el, [
+        el.style.getPropertyValue('visibility'),
+        el.style.getPropertyPriority('visibility'),
+      ]);
+      el.style.setProperty('visibility', 'hidden', 'important');
+      shadowHidden.add(el);
+    } catch (e) {}
+  }
+
+  function unhideShadowEl(el) {
+    if (!shadowHidden.has(el)) return;
+    shadowHidden.delete(el);
+    const prev = shadowPrevVis.get(el);
+    shadowPrevVis.delete(el);
+    try {
+      if (prev && prev[0]) el.style.setProperty('visibility', prev[0], prev[1] || '');
+      else el.style.removeProperty('visibility');
+    } catch (e) {}
+  }
+
   // SVG geometry attributes that chart libraries animate. We keep this list
   // narrow on purpose — including `x`, `y`, `width`, `height` would catch bar-
   // chart reveal animations but also trigger 300ms hides on static SVG icons
@@ -50,11 +94,22 @@
 
   function markSettling(el) {
     origSetAttribute.call(el, 'data-still-svg-settling', '');
+    // ownerSVGElement mirrors the CSS rule's `svg [data-still-svg-settling]`
+    // descendant scoping: geometry writes on the <svg> root itself never hide.
+    if (!shadowHidden.has(el) && el.ownerSVGElement && !stillOff()) {
+      try {
+        const root = el.getRootNode();
+        if (typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot) {
+          hideShadowEl(el);
+        }
+      } catch (e) {}
+    }
     const existing = svgSettleTimers.get(el);
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
       el.removeAttribute('data-still-svg-settling');
       svgSettleTimers.delete(el);
+      unhideShadowEl(el);
     }, SETTLE_MS);
     svgSettleTimers.set(el, t);
   }
@@ -80,6 +135,33 @@
     }
     return origSetAttributeNS.apply(this, arguments);
   };
+
+  // Undo inline shadow hides when content.js signals disabled/allowlisted.
+  // (The CSS-rule path needs no counterpart: content.js gates its own <style>.)
+  // Same deferred install as the canvas off-observer below: documentElement
+  // may not exist yet in test-harness init timing.
+  function installSvgOffObserver() {
+    try {
+      new MutationObserver(function () {
+        if (stillOff()) Array.from(shadowHidden).forEach(unhideShadowEl);
+      }).observe(document.documentElement, {
+        attributes: true, attributeFilter: ['data-still-off'],
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+  if (!installSvgOffObserver()) {
+    try {
+      document.addEventListener('DOMContentLoaded', installSvgOffObserver, { once: true });
+    } catch (e) {}
+  }
+
+  // Test hook (main world).
+  try {
+    window.__stillSvg = {
+      shadowHiddenCount: function () { return shadowHidden.size; },
+    };
+  } catch (e) {}
 
   // --- jQuery animation disable ---
   // jQuery's .animate / .fadeIn / .slideUp etc use requestAnimationFrame and
