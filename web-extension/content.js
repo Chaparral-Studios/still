@@ -81,6 +81,19 @@
     // Kill all CSS transitions so style changes are instant (prevents smooth
     // crossfades, carousel glides, etc.).
     '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Specificity-armored copy of the same kill. When a site declares its own
+    // `transition: ... !important` (urop.mit.edu's Max Mega Menu:
+    // `#mega-menu-wrap… a.mega-menu-link { transition: 100ms all !important }`),
+    // both declarations are author-origin !important and the cascade
+    // tie-breaks on SPECIFICITY — the universal `*` rule (0,0,0) loses to any
+    // real selector, so nav links still glide on hover. Each `:not(#…)`
+    // matches every element while adding ID-level specificity; six of them
+    // (6,0,0) beat any realistic site selector. Kept as a separate rule from
+    // the plain one above so a parser that chokes on it drops only the armor.
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; }',
     // Kill animations ONLY on html/body (covers WordPress body fade-in reveal
     // pattern that hid the whole page on nplusonemag.com). JS cancelAnimations
     // handles other page-level animations via updateTiming+finish.
@@ -208,6 +221,9 @@
         // leave the curtain bars permanently pinned at left:100%, since the
         // !important rule keeps overriding the page's inline-style writes.
         document.getElementById('__still-host-rules')?.remove();
+        // Release pinned custom props — the page's own writes resume having
+        // effect on its next update (scroll event etc.); no restore needed.
+        unpinAllStyles();
         document.querySelectorAll('img[data-still="replacing"]').forEach((img) => {
           img.dataset.still = '';
           img.style.visibility = '';
@@ -1014,6 +1030,146 @@
     cancelAnimations();
   }
 
+  // --- Scroll-linked custom-property animation pinning ---
+  // Pattern (gothamist.com article reading-progress bar): page JS rewrites a
+  // CSS custom property in an element's inline `style` on every scroll event,
+  // and a stylesheet consumes it via var() — Gothamist's Nuxt build writes
+  // `--v4fda71aa: N%` (Vue v-bind() in <style>) into the fixed article header,
+  // feeding a linear-gradient that sweeps solid black across the top 68px of
+  // the viewport as you scroll. No Animation object (cancelAnimations can't
+  // see it), nothing transitions (duration-zeroing is moot), no rAF loop, no
+  // geometry attribute writes (SVG settling detector doesn't apply) — the
+  // motion lives entirely in repeated inline style attribute writes.
+  //
+  // Detection: a SUSTAINED run of inline-style writes whose only effect is
+  // changing custom properties (`--*`). Ordinary style writes (tooltip
+  // positioning, show/hide, measurement) touch real properties and never
+  // qualify; a theme switch rewrites custom props but lands in one or two
+  // writes, under the run threshold. Once a run qualifies, the element's
+  // custom properties are PINNED: current values recorded, and every later
+  // write that changes one is reverted from this isolated world. Observer
+  // callbacks run before paint, so reverts are invisible — the page's writes
+  // simply stop reaching the screen (same before-paint trick as the
+  // data-still-off defense). Pinning, not hiding: the element (a page header)
+  // is legitimate UI; only its per-scroll repaint fuel is frozen.
+
+  const STYLE_PIN_THRESHOLD = 4;   // distinct-frame custom-prop writes => pin
+  const STYLE_FRAME_GAP_MS = 5;    // writes closer than this are one frame
+  const STYLE_RUN_RESET_MS = 1500; // silence longer than this starts a new run
+                                   // (long enough to bridge discrete mouse-
+                                   // wheel clicks, short enough that isolated
+                                   // writes minutes apart never accumulate)
+
+  const styleSnaps = new WeakMap(); // el -> Map(prop -> value) last observed
+  const styleRuns = new WeakMap();  // el -> { frames, lastWrite }
+  const stylePins = new WeakMap();  // el -> Map(customProp -> [value, priority])
+
+  function snapshotStyle(el) {
+    const m = new Map();
+    const s = el.style;
+    for (let i = 0; i < s.length; i++) {
+      const p = s[i];
+      m.set(p, s.getPropertyValue(p));
+    }
+    return m;
+  }
+
+  function handleStyleMutation(el) {
+    if (!enabled || siteAllowed) return;
+    const cur = snapshotStyle(el);
+    const prev = styleSnaps.get(el);
+    styleSnaps.set(el, cur);
+    if (!prev) return;
+    const changed = [];
+    for (const [p, v] of cur) if (prev.get(p) !== v) changed.push(p);
+    for (const p of prev.keys()) if (!cur.has(p)) changed.push(p);
+    if (!changed.length) return;
+    if (!changed.every((p) => p.startsWith('--'))) {
+      // A real style property moved too — this is ordinary DOM styling, not
+      // the var()-feed pattern. Reset any run in progress.
+      styleRuns.delete(el);
+      return;
+    }
+
+    const pins = stylePins.get(el);
+    if (pins) {
+      // Pinned: revert each changed custom prop to its pinned value. A custom
+      // prop first appearing after the pin gets pinned at its initial value
+      // (the page introducing new per-scroll vars post-pin shouldn't reopen
+      // the motion channel).
+      for (const p of changed) {
+        if (!pins.has(p)) {
+          pins.set(p, [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)]);
+          continue;
+        }
+        const [v, prio] = pins.get(p);
+        try {
+          if (v) el.style.setProperty(p, v, prio);
+          else el.style.removeProperty(p);
+        } catch (e) {}
+      }
+      // Re-snapshot post-revert so our own write diffs as a no-op next round.
+      styleSnaps.set(el, snapshotStyle(el));
+      return;
+    }
+
+    const t = performance.now();
+    let run = styleRuns.get(el);
+    if (!run) { run = { frames: 0, lastWrite: 0 }; styleRuns.set(el, run); }
+    if (run.lastWrite && t - run.lastWrite > STYLE_RUN_RESET_MS) run.frames = 0;
+    if (!run.lastWrite || t - run.lastWrite > STYLE_FRAME_GAP_MS) run.frames++;
+    run.lastWrite = t;
+    if (run.frames >= STYLE_PIN_THRESHOLD) {
+      const pinned = new Map();
+      for (const [p] of cur) {
+        if (p.startsWith('--')) {
+          pinned.set(p, [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)]);
+        }
+      }
+      stylePins.set(el, pinned);
+      styleRuns.delete(el);
+      // Marker is cosmetic + how unpinAllStyles finds pinned elements (no
+      // strong element Set — the canvas patch's SPA-leak lesson).
+      try { el.setAttribute('data-still-style', 'pinned'); } catch (e) {}
+    }
+  }
+
+  function unpinAllStyles() {
+    try {
+      document.querySelectorAll('[data-still-style="pinned"]').forEach((el) => {
+        stylePins.delete(el);
+        el.removeAttribute('data-still-style');
+      });
+    } catch (e) {}
+  }
+
+  function observeStyleMutations() {
+    // Separate observer from observeMutations: `style` fires on every inline
+    // write site-wide (rAF animation libraries write per element per frame),
+    // so this path is built to early-out cheaply — the shared observer's
+    // attribute handler does tag-specific work we'd have to skip around.
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        const el = m.target;
+        if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.style) continue;
+        // Fast path: neither old nor new value mentions a custom property —
+        // skip the snapshot/diff entirely (this is the per-frame transform-
+        // writer case: GSAP, parallax libs, drag handlers).
+        const oldV = m.oldValue || '';
+        let newV = '';
+        try { newV = el.getAttribute('style') || ''; } catch (e) {}
+        if (oldV.indexOf('--') === -1 && newV.indexOf('--') === -1) continue;
+        handleStyleMutation(el);
+      }
+    });
+    observer.observe(document.documentElement, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+      attributeOldValue: true,
+    });
+  }
+
   // --- MutationObserver ---
 
   let scanTimer = null;
@@ -1165,25 +1321,51 @@
     //     snaps instantly to the animation's end state and keeps it there.
     try {
       for (const a of document.getAnimations({ subtree: true })) {
-        try {
-          const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
-            ? a.effect.getComputedTiming()
-            : null;
-          const iterations = timing && timing.iterations;
-          if (iterations === Infinity) {
-            a.cancel();
-          } else if (a.effect && typeof a.effect.updateTiming === 'function') {
-            // Force fill to forwards so the end state persists post-finish,
-            // even if the author specified fill: none (default).
-            try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
-            a.finish();
-          } else {
-            a.cancel();
-          }
-        } catch (e) {
-          try { a.cancel(); } catch (e2) {}
-        }
+        neutralizeAnimation(a);
       }
+    } catch (e) {}
+  }
+
+  function neutralizeAnimation(a) {
+    try {
+      const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+        ? a.effect.getComputedTiming()
+        : null;
+      const iterations = timing && timing.iterations;
+      if (iterations === Infinity) {
+        a.cancel();
+      } else if (a.effect && typeof a.effect.updateTiming === 'function') {
+        // Force fill to forwards so the end state persists post-finish,
+        // even if the author specified fill: none (default).
+        try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
+        a.finish();
+      } else {
+        a.cancel();
+      }
+    } catch (e) {
+      try { a.cancel(); } catch (e2) {}
+    }
+  }
+
+  // Late-starting CSS animations. cancelAnimations() runs at load plus a few
+  // timed passes (last at 10s) — an animation whose active period begins
+  // AFTER that (hover-triggered keyframes, scroll-triggered reveals, lazy
+  // widgets on long-lived pages) used to run untouched. `animationstart`
+  // bubbles and fires for every CSS animation the moment it begins, so this
+  // closes the hole for good. The handler runs in the same task, before the
+  // next paint — at most one frame of the animation is ever visible.
+  // (WAAPI element.animate() calls fire no such event; those remain covered
+  // only by the timed passes — no reported site needs more yet.)
+  function installAnimationStartCanceller() {
+    try {
+      document.addEventListener('animationstart', (e) => {
+        if (!enabled || siteAllowed) return;
+        const t = e.target;
+        if (!t || typeof t.getAnimations !== 'function') return;
+        try {
+          for (const a of t.getAnimations()) neutralizeAnimation(a);
+        } catch (err) {}
+      }, { capture: true, passive: true });
     } catch (e) {}
   }
 
@@ -1197,6 +1379,8 @@
 
     scanAll();
     observeMutations();
+    observeStyleMutations();
+    installAnimationStartCanceller();
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => { scanAll(); cancelAnimations(); });
@@ -1221,7 +1405,8 @@
       isDefinitelyAnimated, isMaybeAnimated, hasStaticExtension, isExtensionless,
       isSpacer, isAnimatedDataGif,
       scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
-      cancelAnimations,
+      cancelAnimations, neutralizeAnimation, handleStyleMutation, unpinAllStyles,
+      isStylePinned: (el) => stylePins.has(el),
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
       isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
       checkOpenProbe, matchesHide, probeCache,

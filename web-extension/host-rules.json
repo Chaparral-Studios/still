@@ -7,5 +7,11 @@
   ],
   "www.giphy.com": [
     "img.giphy-gif-img { background-color: #e8e8e8 !important; }"
+  ],
+  "gothamist.com": [
+    ".article-page-header-progress { background: #fff !important; }"
+  ],
+  "www.gothamist.com": [
+    ".article-page-header-progress { background: #fff !important; }"
   ]
 }
