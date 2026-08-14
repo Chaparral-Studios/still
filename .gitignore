@@ -18,3 +18,8 @@ tests/motion/cookies/
 
 # Browser-generated declarativeNetRequest indexed rulesets
 web-extension/_metadata/
+
+# Chrome Web Store build artifacts
+dist/
+store/chrome/.build/
+tests/motion/.verify-userdata/

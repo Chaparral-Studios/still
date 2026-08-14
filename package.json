@@ -7,7 +7,9 @@
     "test:headed": "npx playwright test --headed",
     "convert:ios": "xcrun safari-web-extension-converter web-extension/ --project-location Still/ --app-name Still --bundle-identifier com.jonbaker.still --ios-only --no-open",
     "convert:macos": "xcrun safari-web-extension-converter web-extension/ --project-location StillMac/ --app-name Still --bundle-identifier com.jonbaker.still --macos-only --no-open",
-    "convert:all": "xcrun safari-web-extension-converter web-extension/ --project-location StillUniversal/ --app-name Still --bundle-identifier com.jonbaker.still --no-open"
+    "convert:all": "xcrun safari-web-extension-converter web-extension/ --project-location StillUniversal/ --app-name Still --bundle-identifier com.jonbaker.still --no-open",
+    "store:package": "./scripts/package-chrome.sh",
+    "store:screenshots": "node scripts/make-screenshots.mjs"
   },
   "keywords": [
     "safari",
