@@ -34,15 +34,12 @@ Requires `ffmpeg` on PATH.
    Use an account you will keep: transferring a published item later is
    awkward.
 2. **Host the privacy policy.** The store requires a public URL, not a file.
-   Simplest route with this repo — enable GitHub Pages on the repository
-   (Settings → Pages → Deploy from branch → `main` → `/docs`), then:
-
-   ```bash
-   mkdir -p docs && cp store/chrome/privacy-policy.html docs/privacy.html
-   ```
+   The page is already written and committed at `docs/privacy.html`, so the
+   only step left is to serve it: repository **Settings → Pages → Deploy from
+   branch → `main` → `/docs`**.
 
    The URL becomes `https://chaparral-studios.github.io/still/privacy.html`.
-   Verify it loads before submitting — a 404 here is a guaranteed rejection.
+   Open it before submitting — a 404 here is a guaranteed rejection.
 
 ## Submit
 

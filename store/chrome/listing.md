@@ -172,7 +172,8 @@ autoplaying video, and CSS/canvas/SVG animation — for users who experience
 migraine, nausea, or seizures from that motion.
 ```
 
-**Privacy policy URL**: the hosted copy of `privacy-policy.html` (see README).
+**Privacy policy URL**: `https://chaparral-studios.github.io/still/privacy.html`
+— served from `docs/privacy.html` once GitHub Pages is enabled (see README).
 
 ---
 
