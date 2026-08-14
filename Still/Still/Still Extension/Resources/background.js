@@ -170,6 +170,55 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async response
   }
 
+  if (msg.type === 'byteProbe') {
+    // Cross-origin Range fetch on behalf of a content script — the byte-level
+    // sibling of headProbe, for CDNs whose animated WebP/APNG can only be
+    // classified by inspecting the file prefix (i.ytimg.com an_webp hover
+    // thumbnails are the canonical case: no Access-Control-Allow-Origin, so
+    // the content script's own Range fetch rejects and the animation leaked
+    // as "static"). Returns the first 4KB as a plain array — Uint8Array does
+    // not survive extension messaging.
+    if (typeof msg.url !== 'string' || !/^https?:\/\//i.test(msg.url)) {
+      sendResponse({ ok: false, error: 'invalid url' });
+      return true;
+    }
+    fetch(msg.url, { credentials: 'omit', headers: { 'Range': 'bytes=0-4095' } })
+      .then(async (res) => {
+        if (!res.ok) {
+          sendResponse({ ok: false, status: res.status });
+          return;
+        }
+        // Cap the read at 4KB ourselves — servers that ignore Range would
+        // otherwise stream the whole file into the worker.
+        let bytes;
+        if (res.body && res.body.getReader) {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (total < 4096) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            total += value.length;
+          }
+          try { reader.cancel(); } catch (e) {}
+          bytes = new Uint8Array(Math.min(total, 4096));
+          let off = 0;
+          for (const c of chunks) {
+            const n = Math.min(c.length, bytes.length - off);
+            bytes.set(c.subarray(0, n), off);
+            off += n;
+            if (off >= bytes.length) break;
+          }
+        } else {
+          bytes = new Uint8Array(await res.arrayBuffer()).slice(0, 4096);
+        }
+        sendResponse({ ok: true, bytes: Array.from(bytes) });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true; // async response
+  }
+
   if (msg.type === 'getState') {
     storageGet(['enabled', 'allowlist']).then((result) => {
       const host = msg.host || '';

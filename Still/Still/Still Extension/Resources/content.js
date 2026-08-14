@@ -478,22 +478,43 @@
     return p;
   }
 
+  function classifyFrameBytes(u, bytes) {
+    if (u.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
+    if (u.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
+    // Check both if unclear
+    return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
+  }
+
+  function bytesViaBackground(url) {
+    // Byte-level sibling of probeViaBackground: the service worker's Range
+    // fetch is not bound by page CORS, so it can read file prefixes from
+    // CDNs with no Access-Control-Allow-Origin (i.ytimg.com an_webp hover
+    // thumbnails). Resolves a Uint8Array or null.
+    try {
+      const p = api.runtime.sendMessage({ type: 'byteProbe', url });
+      if (!p || typeof p.then !== 'function') return Promise.resolve(null);
+      return p.then((r) => (r && r.ok && Array.isArray(r.bytes) && r.bytes.length)
+        ? Uint8Array.from(r.bytes) : null)
+        .catch(() => null);
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+  }
+
   function checkAnimationByPartialFetch(url) {
     // Fetch first 4KB — enough to find ANMF (WebP) or acTL (APNG) markers.
-    // Resolves true/false, or null on fetch failure (treated as static by
-    // callers — fail open — but not memoized, so a later retry can succeed).
+    // A CORS-rejected local fetch retries through the background worker
+    // before giving up. Resolves true/false, or null when both fail (treated
+    // as static by callers — fail open — but not memoized, so a later retry
+    // can succeed).
     return memoProbe('pf:', url, (u) => fetch(u, {
       credentials: 'omit',
       headers: { 'Range': 'bytes=0-4095' }
     })
       .then((res) => readFirstBytes(res, 4096))
-      .then((bytes) => {
-        if (u.match(/\.webp(\?|$)/i)) return isAnimatedWebPBuffer(bytes);
-        if (u.match(/\.apng(\?|$)/i)) return isAnimatedPNGBuffer(bytes);
-        // Check both if unclear
-        return isAnimatedWebPBuffer(bytes) || isAnimatedPNGBuffer(bytes);
-      })
-      .catch(() => null));
+      .then((bytes) => classifyFrameBytes(u, bytes))
+      .catch(() => bytesViaBackground(u)
+        .then((bytes) => (bytes ? classifyFrameBytes(u, bytes) : null))));
   }
 
   // --- Fail-open probes for .png/.svg/.avif (Path B2) ---
@@ -519,13 +540,15 @@
   function checkOpenProbe(url) {
     return memoProbe('op:', url, (u) => {
       if (/\.svg(\?|$)/i.test(u)) return checkSVGAnimated(u);
+      const classify = (bytes) => {
+        if (/\.avif(\?|$)/i.test(u)) return isAnimatedAVIFBuffer(bytes);
+        return isAnimatedPNGBuffer(bytes);
+      };
       return fetch(u, { credentials: 'omit', headers: { 'Range': 'bytes=0-4095' } })
         .then((res) => readFirstBytes(res, 4096))
-        .then((bytes) => {
-          if (/\.avif(\?|$)/i.test(u)) return isAnimatedAVIFBuffer(bytes);
-          return isAnimatedPNGBuffer(bytes);
-        })
-        .catch(() => null);
+        .then(classify)
+        .catch(() => bytesViaBackground(u)
+          .then((bytes) => (bytes ? classify(bytes) : null)));
     });
   }
 
@@ -1000,6 +1023,32 @@
     // enabled/siteAllowed are re-checked live for the mid-page disable case.
     if (!initialized || !enabled || siteAllowed) return;
     if (v.hasAttribute('data-still-user-play')) return;
+    try { v.pause(); } catch (err) {}
+  }, true);
+
+  // The user-play exemption covers one playback, not the element for life.
+  // YouTube's hover preview reuses a single <video>, swapping src per hover
+  // (user report 2026-07-31): with a sticky mark, one gestured play — a click
+  // landing near any preview — unlocked every later hover preview for the
+  // session. loadstart fires when the element begins loading a new resource;
+  // an ungestured one clears the mark, so each new source re-earns it at its
+  // play event. Gestured loadstarts keep the mark because click handlers do
+  // `src = ...; v.play()` in one task and the loadstart/play event order is
+  // unspecified — clearing unconditionally could wipe a just-earned mark.
+  // Like 'play', 'loadstart' doesn't bubble but is seen by capture-phase
+  // document listeners. MSE players keep one blob src across a watch session
+  // (no re-fired loadstart), so quality switches and seeks are unaffected.
+  // The pause() below is load-bearing, not belt-and-braces: swapping src on a
+  // playing element does NOT set .paused back to true — the new resource
+  // resumes with no paused→playing transition, so no 'play' event ever fires
+  // and the re-pause listener above never sees it. loadstart is the only
+  // signal for that continuation.
+  document.addEventListener('loadstart', (e) => {
+    const v = e.target;
+    if (!v || v.tagName !== 'VIDEO') return;
+    if (performance.now() - lastGestureAt < 2000) return;
+    try { v.removeAttribute('data-still-user-play'); } catch (err) {}
+    if (!initialized || !enabled || siteAllowed) return;
     try { v.pause(); } catch (err) {}
   }, true);
 
