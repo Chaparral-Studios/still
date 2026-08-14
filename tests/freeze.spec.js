@@ -1867,4 +1867,200 @@ test.describe('Still — block and replace logic', () => {
     });
     expect(marked).toBe(true);
   });
+
+  // --- Transition kill vs site !important (urop.mit.edu mega-menu pattern) ---
+
+  test('transition kill beats site !important transitions via specificity armor', async ({ page }) => {
+    // urop.mit.edu's Max Mega Menu declares
+    //   #mega-menu-wrap… .mega-menu-item a.mega-menu-link { transition: 100ms all !important }
+    // Both that and our universal kill are author-origin !important, so the
+    // cascade tie-breaks on specificity — the plain `*` rule loses and nav
+    // links glide on hover. The armored `:not(#…)×6` rule (6,0,0) must win.
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${contentJs}</script>
+      <style>
+        #nav .menu-item a.menu-link {
+          transition: 100ms all ease-in-out !important;
+          padding-left: 0;
+        }
+        #nav .menu-item a.menu-link:hover { padding-left: 5px !important; }
+      </style>
+      <body>
+        <nav id="nav"><span class="menu-item"><a class="menu-link" href="#">Item</a></span></nav>
+      </body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
+    const duration = await page.evaluate(
+      () => getComputedStyle(document.querySelector('#nav a.menu-link')).transitionDuration
+    );
+    expect(duration).toBe('0s');
+  });
+
+  // --- Late-starting CSS animation cancellation (animationstart hook) ---
+
+  test('CSS animations that start after the timed passes are neutralized at animationstart', async ({ page }) => {
+    // Hover-triggered keyframes / scroll-triggered reveals begin their active
+    // period long after the last timed cancelAnimations() pass. The
+    // animationstart listener must catch them: infinite → cancelled (static),
+    // finite → snapped to end state with fill upgraded to forwards.
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${contentJs}</script>
+      <style>
+        @keyframes still-test-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes still-test-fade { from { opacity: 0; } to { opacity: 1; } }
+        .spin { animation: still-test-spin 5s linear infinite; }
+        .fade { animation: still-test-fade 3s; opacity: 0; }
+      </style>
+      <body>
+        <div id="spinner" style="width:40px;height:40px"></div>
+        <div id="reveal" style="width:40px;height:40px"></div>
+      </body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
+    const result = await page.evaluate(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // Simulate a late trigger (hover handler adding a class).
+      document.getElementById('spinner').classList.add('spin');
+      document.getElementById('reveal').classList.add('fade');
+      await sleep(150); // > a few frames; animationstart handler has run
+      const spinner = document.getElementById('spinner');
+      const t1 = getComputedStyle(spinner).transform;
+      await sleep(150);
+      const t2 = getComputedStyle(spinner).transform;
+      const reveal = document.getElementById('reveal');
+      return {
+        spinnerStatic: t1 === t2,          // rotation frozen
+        spinnerStates: spinner.getAnimations().map((a) => a.playState),
+        revealOpacity: getComputedStyle(reveal).opacity,  // snapped to end (1)
+        revealStates: reveal.getAnimations().map((a) => a.playState),
+      };
+    });
+    expect(result.spinnerStatic).toBe(true);
+    expect(result.spinnerStates).not.toContain('running');
+    expect(result.revealOpacity).toBe('1');
+    expect(result.revealStates).not.toContain('running');
+  });
+
+  // --- Scroll-linked custom-property pinning (gothamist progress bar) ---
+
+  /** setContent page with mocked browser API + content.js, plus a target div
+   *  whose stylesheet consumes an inline custom property via var() — the
+   *  gothamist article-header reading-progress pattern. */
+  async function setupStylePinPage(page) {
+    const contentJs = fs.readFileSync(CONTENT_SCRIPT, 'utf8');
+    await page.setContent(`
+      <!DOCTYPE html>
+      <script>
+        window.browser = {
+          storage: { local: {
+            get(keys, cb) { cb({ enabled: true, allowlist: [] }); },
+            set() {},
+          }},
+          runtime: { onMessage: { addListener() {} }, sendMessage() { return Promise.resolve(); } },
+        };
+      </script>
+      <script>${contentJs}</script>
+      <style>
+        #progress {
+          height: 68px;
+          background: linear-gradient(90deg, #000, var(--pct), #000, var(--pct), #fff);
+        }
+      </style>
+      <body>
+        <div id="progress" style="--pct: 0%"></div>
+        <div id="tooltip" style="left: 0px; top: 0px"></div>
+      </body>
+    `);
+    await page.waitForFunction(() => !!window.__still, { timeout: 3000 });
+  }
+
+  test('pins custom props after a sustained run of scroll-style writes (gothamist pattern)', async ({ page }) => {
+    await setupStylePinPage(page);
+    const result = await page.evaluate(async () => {
+      const el = document.getElementById('progress');
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // First observed write only establishes the diff baseline; the next
+      // STYLE_PIN_THRESHOLD (4) distinct-frame writes qualify the run.
+      for (let i = 1; i <= 5; i++) {
+        el.style.setProperty('--pct', (i * 10) + '%');
+        await sleep(30);
+      }
+      const pinnedAttr = el.getAttribute('data-still-style');
+      const pinned = window.__still.isStylePinned(el);
+      const valueAtPin = el.style.getPropertyValue('--pct');
+      // Page keeps "scrolling": writes after the pin must be reverted
+      // before paint (observer microtask), leaving the pinned value.
+      el.style.setProperty('--pct', '90%');
+      await sleep(30);
+      const afterWrite = el.style.getPropertyValue('--pct');
+      return { pinnedAttr, pinned, valueAtPin, afterWrite };
+    });
+    expect(result.pinnedAttr).toBe('pinned');
+    expect(result.pinned).toBe(true);
+    expect(result.afterWrite).toBe(result.valueAtPin); // 90% write reverted
+  });
+
+  test('does not pin ordinary style writes or sparse custom-prop writes', async ({ page }) => {
+    await setupStylePinPage(page);
+    const result = await page.evaluate(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // Tooltip-positioning pattern: many real-property writes, no custom props.
+      const tip = document.getElementById('tooltip');
+      for (let i = 1; i <= 8; i++) {
+        tip.style.left = (i * 10) + 'px';
+        await sleep(20);
+      }
+      // Theme-switch pattern: a couple of custom-prop writes, below threshold.
+      const el = document.getElementById('progress');
+      el.style.setProperty('--pct', '10%');
+      await sleep(20);
+      el.style.setProperty('--pct', '20%');
+      await sleep(20);
+      return {
+        tipPinned: window.__still.isStylePinned(tip),
+        progressPinned: window.__still.isStylePinned(el),
+        tipLeft: tip.style.left,
+      };
+    });
+    expect(result.tipPinned).toBe(false);
+    expect(result.progressPinned).toBe(false);
+    expect(result.tipLeft).toBe('80px'); // writes untouched
+  });
+
+  test('mixed real+custom property writes never pin (ordinary DOM styling)', async ({ page }) => {
+    await setupStylePinPage(page);
+    const pinned = await page.evaluate(async () => {
+      const el = document.getElementById('progress');
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 1; i <= 8; i++) {
+        el.style.setProperty('--pct', (i * 10) + '%');
+        el.style.left = (i * 5) + 'px';   // real prop moves in the same frame
+        await sleep(20);
+      }
+      return window.__still.isStylePinned(el);
+    });
+    expect(pinned).toBe(false);
+  });
 });
