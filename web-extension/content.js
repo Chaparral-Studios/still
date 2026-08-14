@@ -962,13 +962,29 @@
   // it. The 2s window is wide enough for click→play handlers and SPA
   // navigations, narrow enough that scroll-triggered autoplay (wheel/trackpad
   // scrolling fires no pointerdown) stays out.
+  //
+  // Ungestured play is re-paused HERE, synchronously with the event — not
+  // left to the next scan. Scans only fire on childList insertions, so an
+  // IntersectionObserver-driven .play() on an already-inserted video (the
+  // LinkedIn feed pattern, user report 2026-07-28) produces no mutation and
+  // used to run until an unrelated feed mutation finally landed — or forever
+  // on an idle page. The mark check below also honors the main-world patch's
+  // play() override, which sets data-still-user-play synchronously *before*
+  // the play event fires when navigator.userActivation is transiently active.
   document.addEventListener('play', (e) => {
     const v = e.target;
     if (!v || v.tagName !== 'VIDEO') return;
     if (v.dataset.stillVideo === 'blocked') return;
     if (performance.now() - lastGestureAt < 2000) {
       try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
+      return;
     }
+    // No recent gesture: script-driven autoplay. `initialized` gates the few
+    // ms before storage resolves (init()'s first scanAll covers that window);
+    // enabled/siteAllowed are re-checked live for the mid-page disable case.
+    if (!initialized || !enabled || siteAllowed) return;
+    if (v.hasAttribute('data-still-user-play')) return;
+    try { v.pause(); } catch (err) {}
   }, true);
 
   function handleVideo(v) {
