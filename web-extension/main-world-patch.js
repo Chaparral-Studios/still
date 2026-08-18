@@ -44,6 +44,158 @@
     } catch (e) { return false; }
   }
 
+  // --- Smooth-scroll neutering ---
+  // A programmatic smooth scroll is animation: the page glides to a new
+  // position over ~300-600ms. Google's SERP image carousel slides its strip
+  // sideways to reveal the next set of thumbnails (user report 2026-08-17),
+  // "back to top" buttons sweep the whole document, and single-page-app anchor
+  // links coast to their target. content.js's CSS forces
+  // `scroll-behavior: auto`, which handles CSS-declared smooth scrolling — but
+  // per CSSOM-View an explicit `behavior: 'smooth'` in the options object wins
+  // over the computed style, so those calls have to be rewritten here.
+  //
+  // Only the behavior is changed; the destination is untouched, so the page
+  // ends up exactly where it intended to be — it just arrives immediately.
+  // The positional arguments (scrollTo(x, y), scrollIntoView(true)) carry no
+  // behavior of their own and defer to the CSS, so they need no rewriting.
+  function instantOptions(opts) {
+    if (!opts || typeof opts !== 'object') return opts;
+    if (opts.behavior !== 'smooth') return opts;
+    // Copy rather than mutate: callers reuse option objects, and a site that
+    // reads back its own config shouldn't see us having edited it.
+    var copy = {};
+    try {
+      for (var k in opts) copy[k] = opts[k];
+    } catch (e) { return opts; }
+    copy.behavior = 'instant';
+    return copy;
+  }
+
+  // Patch the object that actually OWNS the method. Element's scroll methods
+  // live on Element.prototype, but Chrome puts window's own scrollTo/scrollBy/
+  // scroll directly on the window instance — patching Window.prototype there
+  // just creates a shadowed method nobody calls (and pollutes the prototype
+  // with an operation the engine never defined).
+  function patchScrollMethod(target, name) {
+    if (!target || !Object.prototype.hasOwnProperty.call(target, name)) return;
+    var orig = target[name];
+    if (typeof orig !== 'function') return;
+    try {
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: function (a) {
+          // Only the options-dictionary overload carries a behavior; the
+          // positional forms defer to the CSS and pass through untouched.
+          if (stillOff() || !a || typeof a !== 'object') return orig.apply(this, arguments);
+          return orig.call(this, instantOptions(a));
+        }
+      });
+    } catch (e) {}
+  }
+
+  ['scrollTo', 'scrollBy', 'scroll'].forEach(function (m) {
+    patchScrollMethod(Element.prototype, m);
+    // Whichever of the two actually holds it — engines differ.
+    patchScrollMethod(window, m);
+    if (typeof Window !== 'undefined') patchScrollMethod(Window.prototype, m);
+  });
+  patchScrollMethod(Element.prototype, 'scrollIntoView');
+
+  // --- Scripted scroll-position animation (scrollLeft/scrollTop write runs) ---
+  // The scroll methods above only cover animations the page asks the BROWSER to
+  // run. The other half of carousels animate the scroll offset themselves, from
+  // a timer, writing scrollLeft every frame. Google's SERP image carousel is
+  // exactly this (user report 2026-08-17): clicking "Next" produces ~20 writes
+  // 16ms apart easing 0 -> 417, from its xjs bundle. No scrollTo call, no rAF,
+  // no CSS transition — invisible to every other defense here.
+  //
+  // Strategy: detect a RUN of writes to the same element (rapid + same
+  // direction), rewind the one or two writes that already landed, and then
+  // withhold the rest from the real scroll offset while serving the page its
+  // own virtual value on read. When the writes stop, the final value is applied
+  // in a single step. The element therefore moves once, at the end, instead of
+  // twenty times — a hop, not a glide. A run that never ends (an auto-scrolling
+  // marquee ticker) simply stays frozen, which is the whole point of Still.
+  var RUN_GAP_MS = 50;    // writes further apart than this start a new run
+  var RUN_CONFIRM = 2;    // writes in a run before we call it an animation
+  var SCROLL_SETTLE_MS = 120; // quiet period that ends a run
+  var USER_SCROLL_MS = 150;
+  var scrollRuns = new WeakMap();
+
+  // A page that mirrors one scroller onto another (synced table headers,
+  // dual-pane diffs) writes scrollLeft rapidly too — but only while the user is
+  // physically scrolling. Deferring those would freeze the mirrored pane and
+  // read as broken, so recent real scroll input suspends the whole mechanism.
+  var lastUserScrollAt = -Infinity;
+  ['wheel', 'touchmove', 'keydown'].forEach(function (t) {
+    try {
+      document.addEventListener(t, function () { lastUserScrollAt = performance.now(); },
+        { capture: true, passive: true });
+    } catch (e) {}
+  });
+
+  function patchScrollOffset(name) {
+    var d = Object.getOwnPropertyDescriptor(Element.prototype, name);
+    if (!d || !d.get || !d.set) return;
+    try {
+      Object.defineProperty(Element.prototype, name, {
+        configurable: true,
+        enumerable: d.enumerable,
+        get: function () {
+          var st = scrollRuns.get(this);
+          // While withholding, the page must see the position it asked for or
+          // its own easing math (and any "am I there yet" check) breaks.
+          if (st && st.deferring && st.axis === name) return st.virtual;
+          return d.get.call(this);
+        },
+        set: function (v) {
+          var now = performance.now();
+          if (stillOff() || now - lastUserScrollAt < USER_SCROLL_MS) {
+            scrollRuns.delete(this);
+            return d.set.call(this, v);
+          }
+          var st = scrollRuns.get(this);
+          if (!st || st.axis !== name || now - st.lastAt > RUN_GAP_MS) {
+            // First write of a (possible) new run — let it through, but
+            // remember where we were so we can undo it if a run develops.
+            st = { axis: name, count: 1, preRun: d.get.call(this),
+                   virtual: v, deferring: false, timer: null };
+            scrollRuns.set(this, st);
+            st.lastAt = now;
+            d.set.call(this, v);
+            armSettle(this, st, d);
+            return;
+          }
+          st.count++;
+          st.lastAt = now;
+          st.virtual = v;
+          if (!st.deferring && st.count >= RUN_CONFIRM) {
+            st.deferring = true;
+            // Rewind the write(s) that already landed so the run contributes
+            // no visible movement at all before its final jump.
+            try { d.set.call(this, st.preRun); } catch (e) {}
+          }
+          if (!st.deferring) d.set.call(this, v);
+          armSettle(this, st, d);
+        }
+      });
+    } catch (e) {}
+  }
+
+  function armSettle(el, st, d) {
+    if (st.timer) clearTimeout(st.timer);
+    st.timer = setTimeout(function () {
+      scrollRuns.delete(el);
+      if (!st.deferring) return;
+      // The animation is over; land on its destination in one step.
+      try { d.set.call(el, st.virtual); } catch (e) {}
+    }, SCROLL_SETTLE_MS);
+  }
+
+  patchScrollOffset('scrollLeft');
+  patchScrollOffset('scrollTop');
+
   // --- Shadow DOM hide path ---
   // The `data-still-svg-settling` attribute set below is hidden by a CSS rule
   // in content.js's document-level <style> — which cannot pierce shadow roots.
