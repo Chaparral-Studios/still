@@ -383,6 +383,76 @@
     }
     return false;
   }
+  // Gesture scoping for the user-play mark (user report 2026-08-17: dismissing
+  // Threads' login modal let the feed video that scrolled in a moment later
+  // keep playing). navigator.userActivation.isActive is page-global and stays
+  // set for ~5s after ANY click, so on its own it can't tell "clicked play"
+  // from "clicked something unrelated, then the page played a video". Track
+  // where the last pointer gesture landed and when each video last started
+  // loading; a click only authorizes a play it plausibly caused. Keydowns stay
+  // target-agnostic (players bind space/k at the document level) — and Escape
+  // never reaches here because Chrome doesn't count it as activation.
+  // Pointer position kept in PAGE coordinates — scrolling between the click
+  // and the play would otherwise drag a stale viewport point across unrelated
+  // videos.
+  var mwPointerAt = -Infinity, mwPointerX = 0, mwPointerY = 0, mwKeyAt = -Infinity;
+  var mwPointerHref = '';
+  var MW_CLICK_PAD_PX = 40;
+  try {
+    document.addEventListener('pointerdown', function (e) {
+      mwPointerAt = performance.now();
+      mwPointerX = e.clientX + window.scrollX; mwPointerY = e.clientY + window.scrollY;
+      mwPointerHref = location.href;
+    }, { capture: true, passive: true });
+  } catch (e) {}
+  try {
+    document.addEventListener('touchstart', function (e) {
+      mwPointerAt = performance.now();
+      var t = e.touches && e.touches[0];
+      if (t) { mwPointerX = t.clientX + window.scrollX; mwPointerY = t.clientY + window.scrollY; }
+      mwPointerHref = location.href;
+    }, { capture: true, passive: true });
+  } catch (e) {}
+  try {
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') mwKeyAt = performance.now();
+    }, { capture: true, passive: true });
+  } catch (e) {}
+  try {
+    document.addEventListener('loadstart', function (e) {
+      var t = e.target;
+      if (t && t.tagName === 'VIDEO') {
+        try { t.__stillMwLoadstartAt = performance.now(); } catch (err) {}
+      }
+    }, true);
+  } catch (e) {}
+  function mwGestureAuthorizes(v) {
+    // Every activation-granting input (pointerdown/touch tap/non-Escape
+    // keydown) also hits our capture-phase listeners, so "isActive with no
+    // gesture recorded" shouldn't happen — fail closed if it somehow does;
+    // content.js's own gesture tracker is the second chance.
+    if (mwPointerAt === -Infinity && mwKeyAt === -Infinity) return false;
+    if (mwKeyAt >= mwPointerAt) return true;
+    var r = null;
+    try { r = v.getBoundingClientRect(); } catch (e) {}
+    if (r && r.width > 0 && r.height > 0) {
+      var left = r.left + window.scrollX, top = r.top + window.scrollY;
+      if (mwPointerX >= left - MW_CLICK_PAD_PX && mwPointerX <= left + r.width + MW_CLICK_PAD_PX &&
+          mwPointerY >= top - MW_CLICK_PAD_PX && mwPointerY <= top + r.height + MW_CLICK_PAD_PX) {
+        return true;
+      }
+    }
+    // Click elsewhere, but it NAVIGATED (SPA thumbnail click → watch page) and
+    // this video began loading after it: the click caused the playback. The
+    // href gate keeps infinite feeds (Threads) from getting their lazily
+    // inserted videos authorized by an unrelated click. readyState 0 is the
+    // loadstart rule's synchronous twin — `src = ...; v.play()` in one task
+    // calls play() before the queued loadstart event has fired.
+    if (location.href === mwPointerHref) return false;
+    if (v.__stillMwLoadstartAt !== undefined && v.__stillMwLoadstartAt >= mwPointerAt) return true;
+    return v.readyState === 0;
+  }
+
   const origMediaPlay = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () {
     const tagged = this.getAttribute && this.getAttribute('data-still-video') === 'blocked';
@@ -400,10 +470,13 @@
     // leaves this video alone (it re-pauses autoplaying videos on every scan;
     // without this mark it kept pausing YouTube mid-watch).
     // userActivation.isActive is the TRANSIENT bit — true only briefly after
-    // a real gesture — so script-driven autoplay retries don't qualify.
+    // a real gesture — so script-driven autoplay retries don't qualify. It is
+    // page-global, though, so additionally require the gesture to be scoped to
+    // this video (see mwGestureAuthorizes above).
     try {
       if (typeof navigator !== 'undefined' && navigator.userActivation &&
-          navigator.userActivation.isActive && this.setAttribute) {
+          navigator.userActivation.isActive && this.setAttribute &&
+          mwGestureAuthorizes(this)) {
         this.setAttribute('data-still-user-play', '');
       }
     } catch (e) {}

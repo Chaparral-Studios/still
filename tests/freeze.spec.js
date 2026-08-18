@@ -1849,7 +1849,7 @@ test.describe('Still — block and replace logic', () => {
     );
   });
 
-  test('videos: play shortly after a real user gesture is marked user-initiated', async ({ page }) => {
+  test('videos: play shortly after a user gesture ON the video is marked user-initiated', async ({ page }) => {
     await injectContentScript(page);
     await page.goto(baseURL + '/test-page.html');
     await page.addScriptTag({ path: CONTENT_SCRIPT });
@@ -1858,8 +1858,10 @@ test.describe('Still — block and replace logic', () => {
       v.id = 'gesture-video';
       document.body.appendChild(v);
     });
-    // Real (trusted) user gesture, then a play event on the video.
-    await page.mouse.click(10, 10);
+    // Real (trusted) user gesture on the video itself, then a play event.
+    // (A click elsewhere no longer counts — see linkedin-video.spec.js for the
+    // Threads modal-dismiss regression suite.)
+    await page.click('#gesture-video');
     const marked = await page.evaluate(() => {
       const v = document.getElementById('gesture-video');
       v.dispatchEvent(new Event('play'));

@@ -133,14 +133,40 @@ test.describe('LinkedIn scroll-autoplay', () => {
     expect(s.currentTime).toBeLessThan(0.5);
   });
 
-  test('a click within the gesture window still exempts the video (YouTube safety)', async ({ page }) => {
+  // Threads regression (user report 2026-08-17): dismissing the login modal —
+  // a click outside the dialog, or Escape — used to hand the user-play mark to
+  // the unrelated feed video that scrolled in moments later. A gesture now
+  // only authorizes a play it plausibly caused: a click on the video itself
+  // (padded rect, page coordinates), a click that made the video load a new
+  // resource (SPA), or a non-Escape keydown (document-level player shortcuts).
+
+  test('a click away from the video no longer exempts it (Threads modal dismiss)', async ({ page }) => {
     await setup(page);
     await page.evaluate(() => window.scrollTo(0, 2200)); // video near viewport edge
-    await page.mouse.click(200, 100); // e.g. reacting to a post
+    await page.mouse.click(200, 50); // dismissing a dialog, liking a post, ...
     await page.evaluate(() => window.scrollTo(0, 2450)); // video now in view; IO fires
+    await page.waitForFunction(() => window.__playAttempts > 0, null, { timeout: 5000 });
+    await page.waitForTimeout(600);
+
+    // After the scroll the video occupies the viewport point that was clicked
+    // (viewport y=50 is inside its on-screen rect) — the page-coordinate check
+    // must not be fooled by that.
+    const s = await vidState(page);
+    expect(s.paused).toBe(true);
+    expect(s.userPlayMark).toBe(false);
+    expect(s.currentTime).toBeLessThan(0.3);
+  });
+
+  test('a click on the video itself still exempts it', async ({ page }) => {
+    await setup(page, { query: '?retry' });
+    await page.evaluate(() => window.scrollTo(0, 2450)); // IO fires ungestured
+    await page.waitForFunction(() => window.__playAttempts > 0, null, { timeout: 5000 });
+    expect((await vidState(page)).paused).toBe(true); // blocked so far
+
+    // Video is at page y 2400..2640, scroll 2450 → on-screen center ~(168, 70).
+    await page.mouse.click(168, 70);
     await page.waitForFunction(() => !document.getElementById('feedvid').paused,
       null, { timeout: 5000 });
-
     expect((await vidState(page)).userPlayMark).toBe(true);
 
     // Scans don't pause it either.
@@ -151,5 +177,71 @@ test.describe('LinkedIn scroll-autoplay', () => {
     });
     await page.waitForTimeout(800);
     expect((await vidState(page)).paused).toBe(false);
+  });
+
+  test('a click elsewhere still exempts a video it caused to load (SPA navigation)', async ({ page }) => {
+    await setup(page, { noActivation: true }); // content-script path only
+    await page.mouse.click(200, 50); // e.g. clicking a thumbnail/nav link
+    // The "navigation": URL changes (the discriminator vs. a feed lazily
+    // inserting videos after an unrelated click), the player gets a new
+    // resource, and the page plays it.
+    await page.evaluate(() => {
+      history.pushState({}, '', '/watch?v=abc');
+      const v = document.getElementById('feedvid');
+      v.src = '/test-video.webm?watchpage';
+      v.play().catch(() => {});
+    });
+    await page.waitForFunction(() => !document.getElementById('feedvid').paused,
+      null, { timeout: 5000 });
+    expect((await vidState(page)).userPlayMark).toBe(true);
+  });
+
+  test('a click does not exempt a feed-inserted video when the URL never changed', async ({ page }) => {
+    await setup(page, { noActivation: true });
+    await page.mouse.click(200, 50); // dismissing a dialog, liking a post, ...
+    // Threads-style lazy insert: a brand-new loading video plays immediately,
+    // inside the gesture window — but the click didn't navigate anywhere.
+    await page.evaluate(() => {
+      const v = document.createElement('video');
+      v.id = 'lazyvid';
+      v.muted = true; v.setAttribute('playsinline', '');
+      v.src = '/test-video.webm?lazy';
+      document.body.appendChild(v);
+      v.play().catch(() => {});
+    });
+    await page.waitForTimeout(800);
+
+    const s = await page.evaluate(() => {
+      const v = document.getElementById('lazyvid');
+      return { paused: v.paused, mark: v.hasAttribute('data-still-user-play'), currentTime: v.currentTime };
+    });
+    expect(s.paused).toBe(true);
+    expect(s.mark).toBe(false);
+    expect(s.currentTime).toBeLessThan(0.3);
+  });
+
+  test('Escape does not exempt the next play (Threads modal dismiss via keyboard)', async ({ page }) => {
+    await setup(page, { noActivation: true, query: '?retry' });
+    await page.evaluate(() => window.scrollTo(0, 2450));
+    await page.waitForFunction(() => window.__playAttempts > 0, null, { timeout: 5000 });
+
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(1200); // several retries inside the gesture window
+
+    const s = await vidState(page);
+    expect(s.paused).toBe(true);
+    expect(s.userPlayMark).toBe(false);
+    expect(s.currentTime).toBeLessThan(0.5);
+  });
+
+  test('a non-Escape keydown still exempts (document-level player shortcuts)', async ({ page }) => {
+    await setup(page, { noActivation: true, query: '?retry' });
+    await page.evaluate(() => window.scrollTo(0, 2450));
+    await page.waitForFunction(() => window.__playAttempts > 0, null, { timeout: 5000 });
+
+    await page.keyboard.press('k'); // YouTube-style play/pause shortcut
+    await page.waitForFunction(() => !document.getElementById('feedvid').paused,
+      null, { timeout: 5000 });
+    expect((await vidState(page)).userPlayMark).toBe(true);
   });
 });
