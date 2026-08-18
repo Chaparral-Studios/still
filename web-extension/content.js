@@ -81,6 +81,13 @@
     // Kill all CSS transitions so style changes are instant (prevents smooth
     // crossfades, carousel glides, etc.).
     '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Smooth scrolling is animation too: a Google SERP image carousel glides
+    // its strip sideways to reveal the next set (user report 2026-08-17), and
+    // "back to top" buttons sweep the whole page. Forcing `auto` makes every
+    // scroll jump straight to its destination. This covers CSS-declared smooth
+    // scroll; JS `scrollTo({behavior:'smooth'})` overrides CSS per spec and is
+    // neutralized separately in main-world-patch.js.
+    '*, *::before, *::after { scroll-behavior: auto !important; }',
     // Specificity-armored copy of the same kill. When a site declares its own
     // `transition: ... !important` (urop.mit.edu's Max Mega Menu:
     // `#mega-menu-wrap… a.mega-menu-link { transition: 100ms all !important }`),
@@ -93,7 +100,7 @@
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
-    ' { transition-duration: 0s !important; }',
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
     // Kill animations ONLY on html/body (covers WordPress body fade-in reveal
     // pattern that hid the whole page on nplusonemag.com). JS cancelAnimations
     // handles other page-level animations via updateTiming+finish.

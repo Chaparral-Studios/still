@@ -44,6 +44,64 @@
     } catch (e) { return false; }
   }
 
+  // --- Smooth-scroll neutering ---
+  // A programmatic smooth scroll is animation: the page glides to a new
+  // position over ~300-600ms. Google's SERP image carousel slides its strip
+  // sideways to reveal the next set of thumbnails (user report 2026-08-17),
+  // "back to top" buttons sweep the whole document, and single-page-app anchor
+  // links coast to their target. content.js's CSS forces
+  // `scroll-behavior: auto`, which handles CSS-declared smooth scrolling — but
+  // per CSSOM-View an explicit `behavior: 'smooth'` in the options object wins
+  // over the computed style, so those calls have to be rewritten here.
+  //
+  // Only the behavior is changed; the destination is untouched, so the page
+  // ends up exactly where it intended to be — it just arrives immediately.
+  // The positional arguments (scrollTo(x, y), scrollIntoView(true)) carry no
+  // behavior of their own and defer to the CSS, so they need no rewriting.
+  function instantOptions(opts) {
+    if (!opts || typeof opts !== 'object') return opts;
+    if (opts.behavior !== 'smooth') return opts;
+    // Copy rather than mutate: callers reuse option objects, and a site that
+    // reads back its own config shouldn't see us having edited it.
+    var copy = {};
+    try {
+      for (var k in opts) copy[k] = opts[k];
+    } catch (e) { return opts; }
+    copy.behavior = 'instant';
+    return copy;
+  }
+
+  // Patch the object that actually OWNS the method. Element's scroll methods
+  // live on Element.prototype, but Chrome puts window's own scrollTo/scrollBy/
+  // scroll directly on the window instance — patching Window.prototype there
+  // just creates a shadowed method nobody calls (and pollutes the prototype
+  // with an operation the engine never defined).
+  function patchScrollMethod(target, name) {
+    if (!target || !Object.prototype.hasOwnProperty.call(target, name)) return;
+    var orig = target[name];
+    if (typeof orig !== 'function') return;
+    try {
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: function (a) {
+          // Only the options-dictionary overload carries a behavior; the
+          // positional forms defer to the CSS and pass through untouched.
+          if (stillOff() || !a || typeof a !== 'object') return orig.apply(this, arguments);
+          return orig.call(this, instantOptions(a));
+        }
+      });
+    } catch (e) {}
+  }
+
+  ['scrollTo', 'scrollBy', 'scroll'].forEach(function (m) {
+    patchScrollMethod(Element.prototype, m);
+    // Whichever of the two actually holds it — engines differ.
+    patchScrollMethod(window, m);
+    if (typeof Window !== 'undefined') patchScrollMethod(Window.prototype, m);
+  });
+  patchScrollMethod(Element.prototype, 'scrollIntoView');
+
   // --- Shadow DOM hide path ---
   // The `data-still-svg-settling` attribute set below is hidden by a CSS rule
   // in content.js's document-level <style> — which cannot pierce shadow roots.
