@@ -53,6 +53,15 @@ const GRID_PAGE = `<!doctype html><html><body>
         thumb.appendChild(v);
       } else {
         v = document.getElementById('preview');
+        // Real YouTube overlays the reused player on the hovered thumbnail;
+        // the click-scoped user-play mark depends on that geometry.
+        // pointer-events:none keeps hover/click targeting the thumbnail, so
+        // the overlay doesn't steal the mouseout/click that drive this page.
+        const r = thumb.getBoundingClientRect();
+        v.style.position = 'absolute';
+        v.style.pointerEvents = 'none';
+        v.style.left = (r.left + scrollX) + 'px';
+        v.style.top = (r.top + scrollY) + 'px';
       }
       v.src = '/test-video.webm?' + thumb.id;
       window.__lastPreview = v;
