@@ -137,12 +137,20 @@ if (clickArrow) {
   if (!arrows.length) {
     console.log('no visible arrow to click — try --url with a page whose carousel has arrows');
   } else {
+    // Sample the RENDERED position (a child's on-screen x), not scrollLeft:
+    // the extension serves a page its own virtual scroll offset while
+    // withholding an animation, so reading scrollLeft reports motion that was
+    // never painted.
     await page.evaluate(`(() => {
       window.__f = [];
       const sc = document.querySelector('[data-probe-scroller]');
+      const child = sc.firstElementChild;
+      const read = () => child
+        ? Math.round(child.getBoundingClientRect().left)
+        : Math.round(sc.scrollLeft);
       const t0 = performance.now();
       const tick = () => { if (performance.now() - t0 > 2000) return;
-        window.__f.push(Math.round(sc.scrollLeft)); requestAnimationFrame(tick); };
+        window.__f.push(read()); requestAnimationFrame(tick); };
       tick();
     })()`);
     await page.mouse.click(arrows[0].x, arrows[0].y);
@@ -150,7 +158,7 @@ if (clickArrow) {
     const res: any = await page.evaluate(`(() => ({
       distinct: window.__f.filter((v, i) => i === 0 || v !== window.__f[i - 1]).length,
       first: window.__f[0], last: window.__f[window.__f.length - 1] }))()`);
-    console.log(`scrollLeft ${res.first} -> ${res.last} | distinct intermediate positions: ${res.distinct}`,
+    console.log(`rendered x ${res.first} -> ${res.last} | distinct intermediate positions: ${res.distinct}`,
       res.distinct <= 5 ? '=> INSTANT HOP' : '=> GLIDE (still animating)');
   }
 }
