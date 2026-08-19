@@ -81,6 +81,13 @@
     // Kill all CSS transitions so style changes are instant (prevents smooth
     // crossfades, carousel glides, etc.).
     '*, *::before, *::after { transition-duration: 0s !important; }',
+    // Smooth scrolling is animation too: a Google SERP image carousel glides
+    // its strip sideways to reveal the next set (user report 2026-08-17), and
+    // "back to top" buttons sweep the whole page. Forcing `auto` makes every
+    // scroll jump straight to its destination. This covers CSS-declared smooth
+    // scroll; JS `scrollTo({behavior:'smooth'})` overrides CSS per spec and is
+    // neutralized separately in main-world-patch.js.
+    '*, *::before, *::after { scroll-behavior: auto !important; }',
     // Specificity-armored copy of the same kill. When a site declares its own
     // `transition: ... !important` (urop.mit.edu's Max Mega Menu:
     // `#mega-menu-wrap… a.mega-menu-link { transition: 100ms all !important }`),
@@ -93,7 +100,7 @@
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
     ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
-    ' { transition-duration: 0s !important; }',
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
     // Kill animations ONLY on html/body (covers WordPress body fade-in reveal
     // pattern that hid the whole page on nplusonemag.com). JS cancelAnimations
     // handles other page-level animations via updateTiming+finish.
@@ -990,13 +997,78 @@
   // Without the exemption, every DOM mutation triggered a scan that re-paused
   // ALL videos, including ones the user deliberately started — YouTube kept
   // pausing mid-watch (user report 2026-07-01).
-  let lastGestureAt = -Infinity;
-  ['pointerdown', 'keydown', 'touchstart'].forEach((t) => {
-    try {
-      document.addEventListener(t, () => { lastGestureAt = performance.now(); },
-        { capture: true, passive: true });
-    } catch (e) {}
-  });
+  //
+  // A gesture is NOT a blank check, though (user report 2026-08-17: dismissing
+  // Threads' login modal — a click outside the dialog, or Escape — let the
+  // profile-feed video that scrolled in moments later autoplay). Clicks only
+  // authorize a play they plausibly caused: the click landed on the video
+  // itself (padded rect — player control bars hang just outside), or the video
+  // started loading a resource AFTER the click (SPA thumbnail click → watch
+  // page player). Keydowns stay target-agnostic because players bind shortcuts
+  // (space/k) at the document level with body focus — but Escape never counts;
+  // Chrome itself excludes it from activation-triggering events, and its main
+  // real-world meaning is "dismiss the dialog", not "play".
+  // Pointer position is kept in PAGE coordinates: the play can come seconds
+  // after the click, and scrolling in between would drag a stale viewport
+  // point across unrelated videos.
+  const GESTURE_WINDOW_MS = 2000;
+  const CLICK_PAD_PX = 40;
+  let lastPointerAt = -Infinity, lastPointerX = 0, lastPointerY = 0;
+  let lastPointerHref = '';
+  const recordPointer = (x, y) => {
+    lastPointerAt = performance.now();
+    lastPointerX = x + window.scrollX; lastPointerY = y + window.scrollY;
+    lastPointerHref = location.href;
+  };
+  let lastKeyAt = -Infinity;
+  try {
+    document.addEventListener('pointerdown', (e) => recordPointer(e.clientX, e.clientY),
+      { capture: true, passive: true });
+  } catch (e) {}
+  try {
+    document.addEventListener('touchstart', (e) => {
+      const t = e.touches && e.touches[0];
+      recordPointer(t ? t.clientX : 0, t ? t.clientY : 0);
+    }, { capture: true, passive: true });
+  } catch (e) {}
+  try {
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') return;
+      lastKeyAt = performance.now();
+    }, { capture: true, passive: true });
+  } catch (e) {}
+
+  function recentGesture() {
+    const now = performance.now();
+    return now - lastPointerAt < GESTURE_WINDOW_MS || now - lastKeyAt < GESTURE_WINDOW_MS;
+  }
+
+  function gestureAuthorizesPlay(v) {
+    const now = performance.now();
+    if (now - lastKeyAt < GESTURE_WINDOW_MS) return true;
+    if (now - lastPointerAt >= GESTURE_WINDOW_MS) return false;
+    let r = null;
+    try { r = v.getBoundingClientRect(); } catch (e) {}
+    if (r && r.width > 0 && r.height > 0) {
+      const left = r.left + window.scrollX, top = r.top + window.scrollY;
+      if (lastPointerX >= left - CLICK_PAD_PX && lastPointerX <= left + r.width + CLICK_PAD_PX &&
+          lastPointerY >= top - CLICK_PAD_PX && lastPointerY <= top + r.height + CLICK_PAD_PX) {
+        return true;
+      }
+    }
+    // Click elsewhere, but it NAVIGATED (location.href changed — SPA thumbnail
+    // click → watch page) and this video began loading after it: the click
+    // caused the playback even though it never touched the player. The href
+    // gate matters: infinite feeds (Threads) lazily insert fresh videos while
+    // the user scrolls, and without it any click in the previous 2s authorized
+    // whichever video the feed inserted next. __stillLoadstartAt is stamped by
+    // the loadstart listener below; readyState 0 is its synchronous twin —
+    // `src = ...; v.play()` in one task calls play() before the queued
+    // loadstart event has fired.
+    if (location.href === lastPointerHref) return false;
+    if (v.__stillLoadstartAt !== undefined && v.__stillLoadstartAt >= lastPointerAt) return true;
+    return v.readyState === 0;
+  }
   // 'play' doesn't bubble, but capture-phase listeners on document still see
   // it. The 2s window is wide enough for click→play handlers and SPA
   // navigations, narrow enough that scroll-triggered autoplay (wheel/trackpad
@@ -1014,7 +1086,7 @@
     const v = e.target;
     if (!v || v.tagName !== 'VIDEO') return;
     if (v.dataset.stillVideo === 'blocked') return;
-    if (performance.now() - lastGestureAt < 2000) {
+    if (gestureAuthorizesPlay(v)) {
       try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
       return;
     }
@@ -1046,7 +1118,10 @@
   document.addEventListener('loadstart', (e) => {
     const v = e.target;
     if (!v || v.tagName !== 'VIDEO') return;
-    if (performance.now() - lastGestureAt < 2000) return;
+    // Stamp before any early return: gestureAuthorizesPlay's SPA rule needs
+    // the load time of gestured loads too.
+    try { v.__stillLoadstartAt = performance.now(); } catch (err) {}
+    if (recentGesture()) return;
     try { v.removeAttribute('data-still-user-play'); } catch (err) {}
     if (!initialized || !enabled || siteAllowed) return;
     try { v.pause(); } catch (err) {}
