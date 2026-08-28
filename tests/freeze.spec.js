@@ -2034,6 +2034,11 @@ test.describe('Still — block and replace logic', () => {
         tip.style.left = (i * 10) + 'px';
         await sleep(20);
       }
+      // A sustained run of writes to a motion property IS caught — by the
+      // JS-motion withholder, not this pinner (see js-animation.spec.js). It
+      // withholds the intermediate frames and lands the destination once the
+      // writes stop, so wait past the settle before reading the result.
+      await sleep(300);
       // Theme-switch pattern: a couple of custom-prop writes, below threshold.
       const el = document.getElementById('progress');
       el.style.setProperty('--pct', '10%');
@@ -2048,7 +2053,8 @@ test.describe('Still — block and replace logic', () => {
     });
     expect(result.tipPinned).toBe(false);
     expect(result.progressPinned).toBe(false);
-    expect(result.tipLeft).toBe('80px'); // writes untouched
+    // Never *pinned* — the value the page asked for is still what it ends on.
+    expect(result.tipLeft).toBe('80px');
   });
 
   test('mixed real+custom property writes never pin (ordinary DOM styling)', async ({ page }) => {
