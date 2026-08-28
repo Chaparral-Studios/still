@@ -1214,20 +1214,47 @@
     return m;
   }
 
-  function handleStyleMutation(el) {
+  // The observer hands us the style attribute as it was BEFORE the write.
+  // Seeding the first observation from that is what lets a run be rewound to
+  // the element's true resting state rather than to the animation's own first
+  // frame — without it the first frame is painted and never taken back.
+  function parseStyleString(str) {
+    const m = new Map();
+    if (!str) return m;
+    for (const decl of str.split(';')) {
+      const i = decl.indexOf(':');
+      if (i === -1) continue;
+      const name = decl.slice(0, i).trim().toLowerCase();
+      if (!name) continue;
+      m.set(name, decl.slice(i + 1).replace(/!\s*important\s*$/i, '').trim());
+    }
+    return m;
+  }
+
+  function handleStyleMutation(el, oldValue) {
     if (!enabled || siteAllowed) return;
     const cur = snapshotStyle(el);
-    const prev = styleSnaps.get(el);
+    const prev = styleSnaps.get(el) || (oldValue !== undefined ? parseStyleString(oldValue) : undefined);
     styleSnaps.set(el, cur);
     if (!prev) return;
     const changed = [];
     for (const [p, v] of cur) if (prev.get(p) !== v) changed.push(p);
     for (const p of prev.keys()) if (!cur.has(p)) changed.push(p);
+    const motionRun = motionRuns.get(el);
+    if (motionRun && motionRun.withholding) {
+      // An empty diff is meaningful here: it means the page rewrote exactly
+      // what we were already holding. The run still needs the write.
+      handleMotionMutation(el, cur, prev, changed);
+      return;
+    }
     if (!changed.length) return;
     if (!changed.every((p) => p.startsWith('--'))) {
-      // A real style property moved too — this is ordinary DOM styling, not
-      // the var()-feed pattern. Reset any run in progress.
+      // A real style property moved too — this is not the var()-feed pattern,
+      // so the custom-property pinner does not apply. Reset any run of its in
+      // progress and hand the write to the JS-motion detector below, which is
+      // the path that catches rAF animation libraries.
       styleRuns.delete(el);
+      handleMotionMutation(el, cur, prev, changed);
       return;
     }
 
@@ -1274,7 +1301,249 @@
     }
   }
 
+  // --- JS-driven motion (rAF animation libraries) ---
+  // User report 2026-08-27: claude.com/product/claude-science "begins to have
+  // horrible animations" as you scroll. It is Webflow + GSAP/ScrollTrigger,
+  // and the extension had NO effect on it whatsoever (residual motion after
+  // the wheel stopped: 2041 rendered states with Still, 2096 without).
+  //
+  // GSAP and every library like it animate by writing inline `transform` /
+  // `opacity` / `filter` on the element every animation frame. That makes the
+  // motion invisible to all of the defenses above: `document.getAnimations()`
+  // returns nothing (no CSS animation, no WAAPI), nothing transitions (so
+  // duration-zeroing is moot), and the custom-property pinner right above
+  // deliberately ignores it — it only fires when EVERY changed property is a
+  // `--*` var, and these writes touch real properties.
+  //
+  // Strategy is the one main-world-patch.js already uses for timer-driven
+  // scrollLeft runs: detect a sustained RUN of writes, rewind the frames that
+  // already landed, WITHHOLD the rest so nothing paints, and apply the final
+  // value in one step once the writes stop. The element arrives where the page
+  // intended, having moved once instead of sixty times — a hop, not a glide.
+  // A run that never settles (an infinite loop animation) simply stays frozen.
+  //
+  // Withholding rather than pinning is what makes this safe for reveal
+  // animations: a fade-up tween ends at the element's resting state, so
+  // "apply the final value on settle" reveals the content properly. Pinning
+  // mid-tween would strand it half-transparent and offset.
+
+  const MOTION_RUN_THRESHOLD = 3;   // distinct-frame writes => it's animating
+  const MOTION_SETTLE_MS = 120;     // quiet period that ends a run
+  const MOTION_RUN_RESET_MS = 400;  // silence longer than this starts a new run
+  const USER_SCROLL_MS = 150;       // see selfAnimators below
+
+  // Properties whose repeated rewriting is what the user perceives as motion.
+  // Deliberately not exhaustive over all of CSS: a run has to move, fade,
+  // blur or reshape something to qualify.
+  const MOTION_PROPS = new Set([
+    'transform', 'translate', 'rotate', 'scale', 'perspective',
+    'transform-origin', 'opacity', 'filter', 'backdrop-filter',
+    'clip-path', 'mask-position', 'background-position', 'background-size',
+    'object-position', 'stroke-dashoffset', 'stroke-dasharray',
+    'left', 'top', 'right', 'bottom', 'width', 'height',
+    'margin-left', 'margin-top', 'margin-right', 'margin-bottom',
+  ]);
+
+  // Cheap pre-filter so the observer can skip the snapshot/diff for style
+  // writes that cannot possibly be motion (display toggles, colour swaps).
+  const MOTION_PROP_RE = /transform|translate|rotate|scale|perspective|opacity|filter|clip-path|mask-position|background-position|background-size|object-position|stroke-dash|left|top|right|bottom|width|height|margin/;
+
+  const motionRuns = new WeakMap();  // el -> run state
+  const selfAnimators = new WeakSet();
+
+  // A page that repositions elements *in response to* scrolling — a virtualized
+  // list (react-window and friends write `transform: translateY()` on rows as
+  // you scroll), a JS sticky header, a 1:1 parallax layer — writes these same
+  // properties every frame. Withholding those would leave rows stranded and
+  // blanks on screen: the list would look broken, not calm. So while the user
+  // is physically scrolling, writes pass through untouched.
+  //
+  // Decorative animation gives itself away by outliving the input: a
+  // ScrollTrigger `scrub` with smoothing keeps drifting for seconds after the
+  // wheel stops, a reveal tween runs on its own timeline, a loop never stops at
+  // all. An element whose run is still going once scroll input has gone quiet
+  // has proved it animates on its own clock, and is added to `selfAnimators` —
+  // from then on it is withheld unconditionally, including mid-scroll. So the
+  // first scroll through a page teaches the extension which elements to still,
+  // and a virtualized list never earns the mark.
+  let lastUserScrollAt = -Infinity;
+  ['wheel', 'touchmove'].forEach((t) => {
+    try {
+      document.addEventListener(t, () => { lastUserScrollAt = performance.now(); },
+        { capture: true, passive: true });
+    } catch (e) {}
+  });
+
+  // A drag writes transform every frame and must stay live, or the page feels
+  // broken under the user's own finger.
+  let pointerDown = false;
+  try {
+    document.addEventListener('pointerdown', () => { pointerDown = true; },
+      { capture: true, passive: true });
+    ['pointerup', 'pointercancel'].forEach((t) => {
+      document.addEventListener(t, () => { pointerDown = false; },
+        { capture: true, passive: true });
+    });
+  } catch (e) {}
+
+  function motionPropsIn(changed) {
+    const out = [];
+    for (const p of changed) if (MOTION_PROPS.has(p)) out.push(p);
+    return out;
+  }
+
+  // Apply the values the run ended on: its destination, in a single step.
+  function landMotionRun(el, run) {
+    motionRuns.delete(el);
+    if (run.timer) { clearTimeout(run.timer); run.timer = null; }
+    if (!run.withholding) return;
+    try {
+      for (const [p, [v, prio]] of run.virtual) {
+        if (v) el.style.setProperty(p, v, prio);
+        else el.style.removeProperty(p);
+      }
+      el.removeAttribute('data-still-motion');
+    } catch (e) {}
+    styleSnaps.set(el, snapshotStyle(el));
+  }
+
+  function armMotionSettle(el, run) {
+    if (run.timer) clearTimeout(run.timer);
+    run.timer = setTimeout(() => { landMotionRun(el, run); }, MOTION_SETTLE_MS);
+  }
+
+  // Opacity gets a rescue rule, because withholding it naively is the one way
+  // this mechanism could hide content the user came to read: a reveal tween
+  // starts the element at opacity 0, so "hold the pre-run value" would keep it
+  // invisible for as long as the run lasts — forever, for a run that never
+  // settles.
+  //
+  // So: a run that starts already-opaque is held where it was, which freezes a
+  // pulsing glow at full and keeps a fade-out visible until its true final
+  // value lands on settle. A run that starts transparent is one that was on
+  // its way IN, and is held at 1 — the content simply appears, at once,
+  // instead of fading. Either way the settle applies the page's real
+  // destination, so a tween that genuinely ends part-transparent still gets
+  // there.
+  const OPAQUE_ENOUGH = 0.9;
+
+  function heldValueFor(run, prop) {
+    const pre = run.preRun.get(prop);
+    if (prop !== 'opacity') return pre;
+    const n = pre && pre[0] !== '' ? parseFloat(pre[0]) : NaN;
+    if (isNaN(n) || n >= OPAQUE_ENOUGH) return pre;
+    return ['1', ''];
+  }
+
+  function handleMotionMutation(el, cur, prev, changed) {
+    const moving = motionPropsIn(changed);
+    let run = motionRuns.get(el);
+    const withholding = !!(run && run.withholding);
+    if (!withholding && !moving.length) { motionRuns.delete(el); return false; }
+    if (pointerDown) {
+      // The user is dragging. Hand the element straight back, at the position
+      // the page last asked for, or it sticks under their finger.
+      if (run) landMotionRun(el, run);
+      motionRuns.delete(el);
+      return false;
+    }
+
+    const now = performance.now();
+    if (!run || now - run.lastAt > MOTION_RUN_RESET_MS) {
+      // First write of a possible run. `prev` is the state before it started —
+      // remember it, because that is what we rewind to if a run develops.
+      run = {
+        frames: 1, lastAt: now, withholding: false, timer: null,
+        preRun: new Map(), virtual: new Map(), props: new Set(moving),
+      };
+      for (const p of MOTION_PROPS) {
+        if (prev.has(p) || cur.has(p)) {
+          run.preRun.set(p, [prev.get(p) || '', '']);
+        }
+      }
+      motionRuns.set(el, run);
+      armMotionSettle(el, run);
+      return false;
+    }
+
+    // Our own reverts come back through the observer like any other write.
+    // Recording those as the destination would land the element exactly where
+    // we were holding it — the animation's first frame — instead of where the
+    // page was taking it. An echo is a write that matches every value we last
+    // wrote, so it is recognised and dropped here.
+    if (run.echo) {
+      let echo = true;
+      for (const [p, v] of run.echo) {
+        if ((cur.get(p) || '') !== v) { echo = false; break; }
+      }
+      if (echo) { armMotionSettle(el, run); return true; }
+    }
+
+    run.lastAt = now;
+    if (!run.withholding) run.frames++;
+    for (const p of moving) run.props.add(p);
+
+    // Record the destination from the LIVE style, for every property this run
+    // touches — not just the ones that differ from last time. While withholding
+    // we have written our own held values into the element, so a page write
+    // that happens to match one of them produces no diff at all; trusting
+    // `changed` here would leave that property's destination a frame stale and
+    // land the element in a mix of two frames.
+    for (const p of run.props) {
+      run.virtual.set(p, [cur.get(p) || '', el.style.getPropertyPriority(p)]);
+    }
+
+    // An element already known to animate on its own clock is withheld from
+    // its very first frame, scroll or no scroll. Everything else gets the
+    // benefit of the doubt while the user is actually scrolling.
+    const scrolling = now - lastUserScrollAt < USER_SCROLL_MS;
+    if (scrolling && !selfAnimators.has(el)) {
+      armMotionSettle(el, run);
+      return false;
+    }
+
+    if (!run.withholding && run.frames >= MOTION_RUN_THRESHOLD) {
+      run.withholding = true;
+      // Reaching here means the element was animating while the user was NOT
+      // scrolling: it runs on its own clock. Remember that, so the next scroll
+      // through this page withholds it from its very first frame rather than
+      // letting it glide until the wheel goes quiet again.
+      selfAnimators.add(el);
+      try { el.setAttribute('data-still-motion', 'withheld'); } catch (e) {}
+    }
+
+    if (run.withholding) {
+      // Revert to the pre-run values. The observer runs before paint, so these
+      // writes never reach the screen — the frames simply do not render.
+      try {
+        for (const p of run.props) {
+          const held = heldValueFor(run, p);
+          if (held && held[0]) el.style.setProperty(p, held[0], held[1]);
+          else el.style.removeProperty(p);
+        }
+      } catch (e) {}
+      const after = snapshotStyle(el);
+      styleSnaps.set(el, after);
+      run.echo = new Map();
+      for (const p of run.props) run.echo.set(p, after.get(p) || '');
+    }
+    armMotionSettle(el, run);
+    return run.withholding;
+  }
+
+  function releaseAllMotion() {
+    try {
+      document.querySelectorAll('[data-still-motion]').forEach((el) => {
+        const run = motionRuns.get(el);
+        if (run) landMotionRun(el, run);
+        el.removeAttribute('data-still-motion');
+        motionRuns.delete(el);
+      });
+    } catch (e) {}
+  }
+
   function unpinAllStyles() {
+    releaseAllMotion();
     try {
       document.querySelectorAll('[data-still-style="pinned"]').forEach((el) => {
         stylePins.delete(el);
@@ -1292,14 +1561,18 @@
       for (const m of mutations) {
         const el = m.target;
         if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.style) continue;
-        // Fast path: neither old nor new value mentions a custom property —
-        // skip the snapshot/diff entirely (this is the per-frame transform-
-        // writer case: GSAP, parallax libs, drag handlers).
+        // Fast path: skip the snapshot/diff for writes that can be neither
+        // the var()-feed pattern nor motion (display toggles, colour swaps).
+        // Per-frame transform writers — GSAP, parallax libs, drag handlers —
+        // used to be skipped here; they are the JS-motion case and now go
+        // through.
         const oldV = m.oldValue || '';
         let newV = '';
         try { newV = el.getAttribute('style') || ''; } catch (e) {}
-        if (oldV.indexOf('--') === -1 && newV.indexOf('--') === -1) continue;
-        handleStyleMutation(el);
+        if (oldV === newV) continue;
+        const hasVar = oldV.indexOf('--') !== -1 || newV.indexOf('--') !== -1;
+        if (!hasVar && !MOTION_PROP_RE.test(oldV) && !MOTION_PROP_RE.test(newV)) continue;
+        handleStyleMutation(el, oldV);
       }
     });
     observer.observe(document.documentElement, {
@@ -1547,6 +1820,12 @@
       scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
       cancelAnimations, neutralizeAnimation, handleStyleMutation, unpinAllStyles,
       isStylePinned: (el) => stylePins.has(el),
+      isMotionWithheld: (el) => {
+        const r = motionRuns.get(el);
+        return !!(r && r.withholding);
+      },
+      isSelfAnimator: (el) => selfAnimators.has(el),
+      releaseAllMotion,
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
       isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
       checkOpenProbe, matchesHide, probeCache,
