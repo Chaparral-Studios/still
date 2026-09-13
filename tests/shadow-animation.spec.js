@@ -200,6 +200,24 @@ test.describe('shadow-root and late-WAAPI animation coverage', () => {
     expect(await moving(page, 'open', 'w')).toBe(false);
   });
 
+  test('a component that reassigns adoptedStyleSheets after attach (Lit pattern) stays covered', async ({ page }) => {
+    await setup(page);
+    // Lit's adoptStyles: wholesale assignment that would drop Still's sheet.
+    const r = await page.evaluate(async () => {
+      const root = window.__open;
+      const own = new CSSStyleSheet(); own.replaceSync('#t { background: green }');
+      root.adoptedStyleSheets = [own];
+      await new Promise((res) => setTimeout(res, 50));
+      const covered = root.adoptedStyleSheets.some((sh) => { try { return sh.cssRules[0].selectorText === '#-still-shadow-marker'; } catch (e) { return false; } });
+      root.getElementById('t').classList.add('go');
+      await new Promise((res) => setTimeout(res, 120));
+      return { covered, tf: getComputedStyle(root.getElementById('t')).transform, own: root.adoptedStyleSheets.includes(own) };
+    });
+    expect(r.own).toBe(true);      // the component's own sheet is untouched
+    expect(r.covered).toBe(true);  // ours was re-appended
+    expect(r.tf).toBe(FINAL);      // and the transition still snaps
+  });
+
   test('an allowlisted site gets none of this', async ({ page }) => {
     await setup(page, { state: { enabled: true, allowlist: ['127.0.0.1'] } });
     await page.evaluate(() => window.__go());

@@ -596,6 +596,7 @@
   ].join('\n');
   let mwShadowSheet = null;
   const mwCoveredRoots = []; // WeakRefs (no strong element Set — SPA-leak lesson)
+  const mwCoveredSet = new WeakSet(); // roots we adopted the sheet into
   function mwShadowCss() {
     try {
       const t = document.getElementById('__still-shadow-css');
@@ -667,6 +668,7 @@
       if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
         if (!mwShadowSheet) { mwShadowSheet = new CSSStyleSheet(); mwShadowSheet.replaceSync(mwShadowCss()); }
         root.adoptedStyleSheets = [...root.adoptedStyleSheets, mwShadowSheet];
+        mwCoveredSet.add(root);
       } else {
         const st = document.createElement('style');
         st.setAttribute('data-still-shadow', '');
@@ -676,10 +678,36 @@
       if (typeof WeakRef === 'function') mwCoveredRoots.push(new WeakRef(root));
     } catch (e) {}
   }
+  // Component libraries assign the whole adopted-sheet list after creating
+  // the root (Lit's adoptStyles: `renderRoot.adoptedStyleSheets = [...]`),
+  // which silently drops the sheet adopted above — measured on kalakendar.com
+  // (Shopify's Lit-based login components): three of six roots had lost it.
+  // Re-append after any assignment that leaves it out. Our own assignments
+  // include the sheet, so this never recurses; the uncover path removes the
+  // root from the set first.
+  try {
+    const d = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'adoptedStyleSheets');
+    if (d && typeof d.set === 'function' && typeof d.get === 'function') {
+      Object.defineProperty(ShadowRoot.prototype, 'adoptedStyleSheets', {
+        configurable: true, enumerable: d.enumerable,
+        get: d.get,
+        set: function (v) {
+          d.set.call(this, v);
+          try {
+            if (mwShadowSheet && mwCoveredSet.has(this) && !stillOff()) {
+              const cur = d.get.call(this);
+              if (Array.prototype.indexOf.call(cur, mwShadowSheet) === -1) d.set.call(this, [...cur, mwShadowSheet]);
+            }
+          } catch (e) {}
+        },
+      });
+    }
+  } catch (e) {}
   function mwUncoverShadowRoots() {
     for (const ref of mwCoveredRoots) {
       const root = ref.deref();
       if (!root) continue;
+      mwCoveredSet.delete(root);
       try {
         if (mwShadowSheet && root.adoptedStyleSheets) {
           root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== mwShadowSheet);

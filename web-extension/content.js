@@ -195,7 +195,15 @@
     } catch (e) { return false; }
   }
   function coverShadowRoot(root) {
-    if (!root || root.__stillCovered) return;
+    if (!root) return;
+    if (root.__stillCovered) {
+      // A component library may have reassigned adoptedStyleSheets since
+      // (Lit's adoptStyles), dropping the sheet — re-adopt on this scan.
+      if (shadowSheet && !shadowRootCovered(root)) {
+        try { root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet]; } catch (e) {}
+      }
+      return;
+    }
     root.__stillCovered = true;
     if (typeof WeakRef === 'function') coveredRoots.push(new WeakRef(root));
     try {
