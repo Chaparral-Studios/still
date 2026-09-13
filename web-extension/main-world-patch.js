@@ -577,13 +577,194 @@
       }, true);
     } catch (e) {}
   }
+  // --- Shadow-root motion coverage ---
+  // content.js's transition kill is a document stylesheet and its animation
+  // cancellation walks the document — neither crosses a shadow boundary, so
+  // web-component UI was fully unprotected (gap-probe.mts, 2026-09-12). This
+  // world sees every attachShadow() call, open or closed, so it adopts the
+  // shared motion-kill sheet into each new root and listens for
+  // animationstart there. The CSS text comes from the template <style> that
+  // content.js publishes (single source of truth); a small fallback covers
+  // the case where content.js hasn't run yet. content.js separately covers
+  // declarative roots it finds during scans; the marker rule keeps the two
+  // writers from double-covering a root.
+  const SHADOW_CSS_FALLBACK = [
+    '#-still-shadow-marker { --still: 1; }',
+    '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    'svg [data-still-svg-settling] { visibility: hidden !important; }',
+    'video[data-still-video="blocked"] { display: none !important; }'
+  ].join('\n');
+  let mwShadowSheet = null;
+  const mwCoveredRoots = []; // WeakRefs (no strong element Set — SPA-leak lesson)
+  const mwCoveredSet = new WeakSet(); // roots we adopted the sheet into
+  function mwShadowCss() {
+    try {
+      const t = document.getElementById('__still-shadow-css');
+      if (t && t.textContent) return t.textContent;
+    } catch (e) {}
+    return SHADOW_CSS_FALLBACK;
+  }
+  function mwRootCovered(root) {
+    try {
+      for (const sh of root.adoptedStyleSheets || []) {
+        try { if (sh.cssRules[0] && sh.cssRules[0].selectorText === '#-still-shadow-marker') return true; } catch (e) {}
+      }
+      return !!root.querySelector(':scope > style[data-still-shadow]');
+    } catch (e) { return false; }
+  }
+
+  // Chained-animation guard. A page that sequences finite animations through
+  // their finished promises (or restarts a CSS animation on animationend)
+  // spins forever once each one finishes instantly: finish → promise resolves
+  // in a microtask → next animate() → finish → … with no frame in between,
+  // and the main thread never yields (measured: page.evaluate hung). After a
+  // burst of neutralizations on the same element, cancel() instead — the
+  // finished promise rejects, no animationend fires, and the chain stops with
+  // the element in its resting style. (StopTheMadness's "Protect animation
+  // end" exists for the same reason.)
+  const MW_BURST_N = 4, MW_BURST_MS = 1000;
+  const mwBursts = new WeakMap(); // target el -> { n, t0 }
+  function mwInBurst(a) {
+    try {
+      const el = a.effect && a.effect.target;
+      if (!el) return false;
+      const t = performance.now();
+      let b = mwBursts.get(el);
+      if (!b || t - b.t0 > MW_BURST_MS) { b = { n: 0, t0: t }; mwBursts.set(el, b); }
+      b.n++;
+      return b.n > MW_BURST_N;
+    } catch (e) { return false; }
+  }
+  function mwNeutralizeAnimation(a) {
+    // Mirror of content.js neutralizeAnimation: infinite → cancel (no end
+    // state to show); finite → fill:forwards + finish (snap to the end).
+    try {
+      const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+        ? a.effect.getComputedTiming() : null;
+      if ((timing && timing.iterations === Infinity) || mwInBurst(a)) {
+        a.cancel();
+      } else if (a.effect && typeof a.effect.updateTiming === 'function') {
+        try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
+        a.finish();
+      } else {
+        a.cancel();
+      }
+    } catch (e) {
+      try { a.cancel(); } catch (e2) {}
+    }
+  }
+  function mwCoverShadowRoot(root) {
+    if (stillOff()) return;
+    try {
+      root.addEventListener('animationstart', function (e) {
+        if (stillOff()) return;
+        const t = e.target;
+        if (!t || typeof t.getAnimations !== 'function') return;
+        try { t.getAnimations().forEach(mwNeutralizeAnimation); } catch (err) {}
+      }, true);
+    } catch (e) {}
+    if (mwRootCovered(root)) return;
+    try {
+      if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
+        if (!mwShadowSheet) { mwShadowSheet = new CSSStyleSheet(); mwShadowSheet.replaceSync(mwShadowCss()); }
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, mwShadowSheet];
+        mwCoveredSet.add(root);
+      } else {
+        const st = document.createElement('style');
+        st.setAttribute('data-still-shadow', '');
+        st.textContent = mwShadowCss();
+        root.appendChild(st);
+      }
+      if (typeof WeakRef === 'function') mwCoveredRoots.push(new WeakRef(root));
+    } catch (e) {}
+  }
+  // Component libraries assign the whole adopted-sheet list after creating
+  // the root (Lit's adoptStyles: `renderRoot.adoptedStyleSheets = [...]`),
+  // which silently drops the sheet adopted above — measured on kalakendar.com
+  // (Shopify's Lit-based login components): three of six roots had lost it.
+  // Re-append after any assignment that leaves it out. Our own assignments
+  // include the sheet, so this never recurses; the uncover path removes the
+  // root from the set first.
+  try {
+    const d = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'adoptedStyleSheets');
+    if (d && typeof d.set === 'function' && typeof d.get === 'function') {
+      Object.defineProperty(ShadowRoot.prototype, 'adoptedStyleSheets', {
+        configurable: true, enumerable: d.enumerable,
+        get: d.get,
+        set: function (v) {
+          d.set.call(this, v);
+          try {
+            if (mwShadowSheet && mwCoveredSet.has(this) && !stillOff()) {
+              const cur = d.get.call(this);
+              if (Array.prototype.indexOf.call(cur, mwShadowSheet) === -1) d.set.call(this, [...cur, mwShadowSheet]);
+            }
+          } catch (e) {}
+        },
+      });
+    }
+  } catch (e) {}
+  function mwUncoverShadowRoots() {
+    for (const ref of mwCoveredRoots) {
+      const root = ref.deref();
+      if (!root) continue;
+      mwCoveredSet.delete(root);
+      try {
+        if (mwShadowSheet && root.adoptedStyleSheets) {
+          root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== mwShadowSheet);
+        }
+        root.querySelectorAll(':scope > style[data-still-shadow]').forEach((st) => st.remove());
+      } catch (e) {}
+    }
+    mwCoveredRoots.length = 0;
+  }
+  function installShadowOffObserver() {
+    try {
+      new MutationObserver(function () { if (stillOff()) mwUncoverShadowRoots(); })
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off'] });
+      return true;
+    } catch (e) { return false; }
+  }
+  if (!installShadowOffObserver()) {
+    try { document.addEventListener('DOMContentLoaded', installShadowOffObserver, { once: true }); } catch (e) {}
+  }
+
   const origAttachShadow = Element.prototype.attachShadow;
   if (typeof origAttachShadow === 'function') {
     Element.prototype.attachShadow = function () {
       const root = origAttachShadow.apply(this, arguments);
       guardShadowRoot(root);
+      mwCoverShadowRoot(root);
       return root;
     };
+  }
+
+  // --- Web Animations API at the source ---
+  // element.animate() fires no animationstart event, so content.js only
+  // caught script-created animations during its timed passes (last at 10s).
+  // A modal that animates itself closed a minute into the page ran untouched
+  // (gap-probe.mts, 2026-09-12). Neutralize at creation instead, and again
+  // after play()/reverse(): a finished animation restarts from the beginning
+  // when played, and reverse() is how many close animations are built.
+  // Gated on stillOn() (state resolved, not allowlisted) because a finish()
+  // can't be undone the way an early canvas freeze can.
+  const origElementAnimate = Element.prototype.animate;
+  if (typeof origElementAnimate === 'function') {
+    Element.prototype.animate = function () {
+      const anim = origElementAnimate.apply(this, arguments);
+      try { if (anim && stillOn()) mwNeutralizeAnimation(anim); } catch (e) {}
+      return anim;
+    };
+  }
+  if (typeof Animation === 'function' && Animation.prototype) {
+    ['play', 'reverse'].forEach(function (m) {
+      const orig = Animation.prototype[m];
+      if (typeof orig !== 'function') return;
+      Animation.prototype[m] = function () {
+        const r = orig.apply(this, arguments);
+        try { if (stillOn()) mwNeutralizeAnimation(this); } catch (e) {}
+        return r;
+      };
+    });
   }
 
   // --- Animated <canvas> freezing ---
