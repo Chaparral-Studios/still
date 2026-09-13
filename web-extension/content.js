@@ -148,6 +148,112 @@
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
 
+  // --- Shadow roots ---
+  // A document stylesheet stops at every shadow boundary, so the transition
+  // kill above never reached web-component UI, and document.getAnimations()
+  // plus the document-level animationstart listener don't see CSS keyframes
+  // running inside shadow trees either (measured 2026-09-12, gap-probe.mts:
+  // both channels ran untouched). Coverage per root: adopt a shared
+  // stylesheet with the motion-kill subset of the rules above (only that
+  // subset — the image pre-hide rules would hide shadow-tree images that
+  // processImage never visits), listen for animationstart on the root, and
+  // include the root in cancelAnimations' timed passes.
+  //
+  // Two writers, by reach: main-world-patch.js covers every root at
+  // attachShadow() time (open or closed) and reads the CSS from the template
+  // element published below; this world covers OPEN roots it finds during
+  // scans — declarative (parser-created) roots never go through
+  // attachShadow, and this path also stands in when a CSP drops the main
+  // world. Each checks the marker rule first so a root is never covered
+  // twice. Closed declarative roots are reachable by neither; accepted.
+  const SHADOW_CSS = [
+    '#-still-shadow-marker { --still: 1; }',
+    '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    'svg [data-still-svg-settling] { visibility: hidden !important; }',
+    'video[data-still-video="blocked"] { display: none !important; }'
+  ].join('\n');
+  // Template for the main world to read: media="not all" keeps it inert in
+  // the document (the document already carries these rules).
+  const shadowTemplate = document.createElement('style');
+  shadowTemplate.id = '__still-shadow-css';
+  shadowTemplate.media = 'not all';
+  shadowTemplate.textContent = SHADOW_CSS;
+  (document.head || document.documentElement).appendChild(shadowTemplate);
+
+  let shadowSheet = null;
+  const coveredRoots = []; // WeakRefs: no strong element Set (the canvas SPA-leak lesson)
+  function shadowRootCovered(root) {
+    try {
+      for (const sh of root.adoptedStyleSheets || []) {
+        try { if (sh.cssRules[0] && sh.cssRules[0].selectorText === '#-still-shadow-marker') return true; } catch (e) {}
+      }
+      return !!root.querySelector(':scope > style[data-still-shadow]');
+    } catch (e) { return false; }
+  }
+  function coverShadowRoot(root) {
+    if (!root || root.__stillCovered) return;
+    root.__stillCovered = true;
+    if (typeof WeakRef === 'function') coveredRoots.push(new WeakRef(root));
+    try {
+      root.addEventListener('animationstart', (e) => {
+        if (!enabled || siteAllowed) return;
+        const t = e.target;
+        if (!t || typeof t.getAnimations !== 'function') return;
+        try { for (const a of t.getAnimations()) neutralizeAnimation(a); } catch (err) {}
+      }, { capture: true, passive: true });
+    } catch (e) {}
+    if (!shadowRootCovered(root)) {
+      try {
+        if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
+          if (!shadowSheet) { shadowSheet = new CSSStyleSheet(); shadowSheet.replaceSync(SHADOW_CSS); }
+          root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet];
+        } else {
+          const st = document.createElement('style');
+          st.setAttribute('data-still-shadow', '');
+          st.textContent = SHADOW_CSS;
+          root.appendChild(st);
+        }
+      } catch (e) {}
+    }
+    cancelAnimationsIn(root);
+    coverOpenShadowRoots(root); // nested roots
+  }
+  function coverOpenShadowRoots(scope) {
+    if (!enabled || siteAllowed) return;
+    try {
+      const nodes = scope.querySelectorAll('*');
+      for (const el of nodes) if (el.shadowRoot) coverShadowRoot(el.shadowRoot);
+    } catch (e) {}
+  }
+  function liveCoveredRoots() {
+    const out = [];
+    for (const ref of coveredRoots) { const r = ref.deref(); if (r) out.push(r); }
+    return out;
+  }
+  function uncoverShadowRoots() {
+    for (const root of liveCoveredRoots()) {
+      try {
+        if (shadowSheet && root.adoptedStyleSheets) {
+          root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== shadowSheet);
+        }
+        root.querySelectorAll(':scope > style[data-still-shadow]').forEach((st) => st.remove());
+      } catch (e) {}
+      root.__stillCovered = false;
+    }
+    coveredRoots.length = 0;
+  }
+  function cancelAnimationsIn(root) {
+    try {
+      for (const child of root.children) {
+        for (const a of child.getAnimations({ subtree: true })) neutralizeAnimation(a);
+      }
+    } catch (e) {}
+  }
+
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
   // --- Per-host CSS rule pack ---
@@ -232,6 +338,8 @@
 
       if (!enabled || siteAllowed) {
         style.remove();
+        shadowTemplate.remove();
+        uncoverShadowRoots();
         // Also drop the per-host CSS rule pack — otherwise allowlisting a
         // site that has a host-rules entry (e.g. president.mit.edu) would
         // leave the curtain bars permanently pinned at left:100%, since the
@@ -1167,6 +1275,7 @@
   }
 
   function scanAll() {
+    coverOpenShadowRoots(document);
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();
@@ -1482,15 +1591,39 @@
         neutralizeAnimation(a);
       }
     } catch (e) {}
+    for (const root of liveCoveredRoots()) cancelAnimationsIn(root);
   }
 
+
+  // Chained-animation guard. A page that sequences finite animations through
+  // their finished promises (or restarts a CSS animation on animationend)
+  // spins forever once each one finishes instantly: finish → promise resolves
+  // in a microtask → next animate() → finish → … with no frame in between,
+  // and the main thread never yields (measured: page.evaluate hung). After a
+  // burst of neutralizations on the same element, cancel() instead — the
+  // finished promise rejects, no animationend fires, and the chain stops with
+  // the element in its resting style. (StopTheMadness's "Protect animation
+  // end" exists for the same reason.)
+  const BURST_N = 4, BURST_MS = 1000;
+  const bursts = new WeakMap(); // target el -> { n, t0 }
+  function inBurst(a) {
+    try {
+      const el = a.effect && a.effect.target;
+      if (!el) return false;
+      const t = performance.now();
+      let b = bursts.get(el);
+      if (!b || t - b.t0 > BURST_MS) { b = { n: 0, t0: t }; bursts.set(el, b); }
+      b.n++;
+      return b.n > BURST_N;
+    } catch (e) { return false; }
+  }
   function neutralizeAnimation(a) {
     try {
       const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
         ? a.effect.getComputedTiming()
         : null;
       const iterations = timing && timing.iterations;
-      if (iterations === Infinity) {
+      if (iterations === Infinity || inBurst(a)) {
         a.cancel();
       } else if (a.effect && typeof a.effect.updateTiming === 'function') {
         // Force fill to forwards so the end state persists post-finish,
@@ -1566,6 +1699,7 @@
       cancelAnimations, neutralizeAnimation, handleStyleMutation, unpinAllStyles,
       isStylePinned: (el) => stylePins.has(el),
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
+      coverShadowRoot, shadowRootCovered, liveCoveredRoots,
       isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
       checkOpenProbe, matchesHide, probeCache,
     };
