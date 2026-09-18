@@ -422,21 +422,88 @@ test.describe('JS-driven motion is withheld', () => {
     await page.mouse.up({ button: 'right' });
   });
 
-  test('read-modify-write steppers reach their destination (accordion/drawer pattern)', async ({ page }) => {
+  test('read-modify-write steppers finish unseen and pop into place (accordion/drawer pattern)', async ({ page }) => {
     await setup(page);
-    await page.evaluate(() => { window.stepLeft('stepLeft'); window.stepTransform('stepTf'); });
+    // Sample what is actually RENDERED every frame while the steppers run.
+    await page.evaluate(() => {
+      window.__seenLeft = new Set(); window.__seenTf = new Set(); window.__sampling = true;
+      const a = document.getElementById('stepLeft'), b = document.getElementById('stepTf');
+      (function s() {
+        window.__seenLeft.add(Math.round(a.getBoundingClientRect().left));
+        window.__seenTf.add(Math.round(b.getBoundingClientRect().left));
+        if (window.__sampling) requestAnimationFrame(s);
+      })();
+      window.stepLeft('stepLeft'); window.stepTransform('stepTf');
+    });
     await page.waitForFunction(() => window.__stepLeftDone && window.__stepTfDone, null, { timeout: 4000 });
-    await page.waitForTimeout(300);
-    const r = await page.evaluate(() => ({
-      left: document.getElementById('stepLeft').style.left,
-      tf: document.getElementById('stepTf').style.transform,
-      rendered: Math.round(document.getElementById('stepLeft').getBoundingClientRect().left),
-      exempt: window.__still.isMotionExempt(document.getElementById('stepLeft')),
-    }));
-    expect(r.left).toBe('300px');
+    await page.waitForTimeout(400);
+    const r = await page.evaluate(() => {
+      window.__sampling = false;
+      const el = document.getElementById('stepLeft');
+      return {
+        left: el.style.left, tf: document.getElementById('stepTf').style.transform,
+        rendered: Math.round(el.getBoundingClientRect().left),
+        seenLeft: window.__seenLeft.size, seenTf: window.__seenTf.size,
+        stepper: window.__still.isReadBackStepper(el), exempt: window.__still.isMotionExempt(el),
+        heldAttr: el.hasAttribute('data-still-hold'), rules: (document.getElementById('__still-hold') || {}).textContent,
+      };
+    });
+    expect(r.left).toBe('300px');                 // the loop ran to completion…
     expect(r.tf).toBe('translateX(300px)');
-    expect(r.rendered).toBe(300);
-    expect(r.exempt).toBe(true);
+    expect(r.rendered).toBe(300);                 // …and the element landed there
+    // …without the 30 intermediate positions ever rendering: start, at most the
+    // two or three 10px frames that paint before ANY run is recognised (the
+    // detection cost every JS animation pays once), and the end.
+    expect(r.seenLeft).toBeLessThanOrEqual(5);
+    expect(r.seenTf).toBeLessThanOrEqual(5);
+    expect(r.stepper).toBe(true);
+    expect(r.exempt).toBe(false);                 // held, not handed back
+    expect(r.heldAttr).toBe(false);               // hold released on settle
+    expect(r.rules).toBe('');
+  });
+
+  test('a known read-back stepper is held from its first write the next time it runs', async ({ page }) => {
+    await setup(page);
+    await page.evaluate(() => window.stepLeft('stepLeft'));
+    await page.waitForFunction(() => window.__stepLeftDone, null, { timeout: 4000 });
+    await page.waitForTimeout(500);
+    const seen = await page.evaluate(async () => {
+      const el = document.getElementById('stepLeft');
+      const seen = new Set(); let sampling = true;
+      (function s() { seen.add(Math.round(el.getBoundingClientRect().left)); if (sampling) requestAnimationFrame(s); })();
+      // Close it again: step back down from 300 to 0, reading its own value.
+      await new Promise((done) => {
+        const step = () => {
+          el.style.left = (parseFloat(el.style.left) - 10) + 'px';
+          if (parseFloat(el.style.left) > 0) requestAnimationFrame(step); else done();
+        };
+        step();
+      });
+      await new Promise((res) => setTimeout(res, 400));
+      sampling = false;
+      return { n: seen.size, final: Math.round(el.getBoundingClientRect().left), left: el.style.left };
+    });
+    expect(seen.left).toBe('0px');
+    expect(seen.final).toBe(0);
+    expect(seen.n).toBeLessThanOrEqual(2); // 300, then 0 — nothing in between
+  });
+
+  test('a read-back loop that never ends (marquee) stays frozen while its own values keep advancing', async ({ page }) => {
+    await setup(page);
+    const r = await page.evaluate(async () => {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;top:400px;left:500px;width:50px;height:20px;background:#a3a';
+      document.body.appendChild(el);
+      const tick = () => { el.style.left = (parseFloat(el.style.left) - 1) + 'px'; requestAnimationFrame(tick); };
+      tick();
+      await new Promise((res) => setTimeout(res, 700)); // detection window
+      const seen = new Set(); const t0 = performance.now();
+      const inline0 = parseFloat(el.style.left);
+      await new Promise((res) => { (function s() { seen.add(Math.round(el.getBoundingClientRect().left)); if (performance.now() - t0 < 600) requestAnimationFrame(s); else res(); })(); });
+      return { rendered: seen.size, inlineMoved: inline0 - parseFloat(el.style.left) };
+    });
+    expect(r.rendered).toBe(1);                    // nothing moves on screen
+    expect(r.inlineMoved).toBeGreaterThan(10);     // the page's own counter is untouched
   });
 
   test('a return-to-rest animation lands AT rest, not on its penultimate frame', async ({ page }) => {
