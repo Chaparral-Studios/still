@@ -23,3 +23,7 @@ web-extension/_metadata/
 dist/
 store/chrome/.build/
 tests/motion/.verify-userdata/
+
+# motion sweep site lists (browser history)
+tests/motion/sites-*.txt
+tests/motion/sweep-sites.json

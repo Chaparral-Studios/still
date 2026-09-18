@@ -148,6 +148,151 @@
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
 
+  // --- Shadow roots ---
+  // A document stylesheet stops at every shadow boundary, so the transition
+  // kill above never reached web-component UI, and document.getAnimations()
+  // plus the document-level animationstart listener don't see CSS keyframes
+  // running inside shadow trees either (measured 2026-09-12, gap-probe.mts:
+  // both channels ran untouched). Coverage per root: adopt a shared
+  // stylesheet with the motion-kill subset of the rules above (only that
+  // subset — the image pre-hide rules would hide shadow-tree images that
+  // processImage never visits), listen for animationstart on the root, and
+  // include the root in cancelAnimations' timed passes.
+  //
+  // Two writers, by reach: main-world-patch.js covers every root at
+  // attachShadow() time (open or closed) and reads the CSS from the template
+  // element published below; this world covers OPEN roots it finds during
+  // scans — declarative (parser-created) roots never go through
+  // attachShadow, and this path also stands in when a CSP drops the main
+  // world. Each checks the marker rule first so a root is never covered
+  // twice. Closed declarative roots are reachable by neither; accepted.
+  const SHADOW_CSS = [
+    '#-still-shadow-marker { --still: 1; }',
+    '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    'svg [data-still-svg-settling] { visibility: hidden !important; }',
+    'video[data-still-video="blocked"] { display: none !important; }'
+  ].join('\n');
+  // Template for the main world to read: media="not all" keeps it inert in
+  // the document (the document already carries these rules).
+  const shadowTemplate = document.createElement('style');
+  shadowTemplate.id = '__still-shadow-css';
+  shadowTemplate.media = 'not all';
+  shadowTemplate.textContent = SHADOW_CSS;
+  (document.head || document.documentElement).appendChild(shadowTemplate);
+
+  let shadowSheet = null;
+  const coveredRoots = []; // WeakRefs: no strong element Set (the canvas SPA-leak lesson)
+  function shadowRootCovered(root) {
+    try {
+      for (const sh of root.adoptedStyleSheets || []) {
+        try { if (sh.cssRules[0] && sh.cssRules[0].selectorText === '#-still-shadow-marker') return true; } catch (e) {}
+      }
+      return !!root.querySelector(':scope > style[data-still-shadow]');
+    } catch (e) { return false; }
+  }
+  // Listener installation is tracked separately from sheet coverage: an
+  // off→on toggle un-covers and re-covers every root, and a second listener
+  // per root would double-feed the burst guard.
+  const shadowListenerRoots = new WeakSet();
+  function coverShadowRoot(root) {
+    if (!root) return;
+    if (root.__stillCovered) {
+      // A component library may have reassigned adoptedStyleSheets since
+      // (Lit's adoptStyles), dropping the sheet — re-adopt on this scan.
+      if (shadowSheet && !shadowRootCovered(root)) {
+        try { root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet]; } catch (e) {}
+      }
+      // A nested declarative root can arrive after its parent was first
+      // covered (streamed SSR fragments, setHTMLUnsafe); document-level
+      // querySelectorAll never descends here, so walk it on rescans too.
+      coverOpenShadowRoots(root);
+      return;
+    }
+    root.__stillCovered = true;
+    if (typeof WeakRef === 'function') coveredRoots.push(new WeakRef(root));
+    if (!shadowListenerRoots.has(root)) {
+      shadowListenerRoots.add(root);
+      try {
+        root.addEventListener('animationstart', (e) => {
+          if (!enabled || siteAllowed) return;
+          const t = e.target;
+          if (!t || typeof t.getAnimations !== 'function') return;
+          try { for (const a of t.getAnimations()) neutralizeAnimation(a); } catch (err) {}
+        }, { capture: true, passive: true });
+      } catch (e) {}
+    }
+    if (!shadowRootCovered(root)) {
+      try {
+        if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
+          if (!shadowSheet) { shadowSheet = new CSSStyleSheet(); shadowSheet.replaceSync(SHADOW_CSS); }
+          root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet];
+        } else {
+          const st = document.createElement('style');
+          st.setAttribute('data-still-shadow', '');
+          st.textContent = SHADOW_CSS;
+          root.appendChild(st);
+        }
+      } catch (e) {}
+    }
+    cancelAnimationsIn(root);
+    coverOpenShadowRoots(root); // nested roots
+  }
+  function coverOpenShadowRoots(scope) {
+    if (!enabled || siteAllowed) return;
+    try {
+      const nodes = scope.querySelectorAll('*');
+      for (const el of nodes) if (el.shadowRoot) coverShadowRoot(el.shadowRoot);
+    } catch (e) {}
+  }
+  // scanAll runs on every mutation batch; a whole-document walk each time is
+  // the cost scanBackgroundImages already learned to avoid. Imperative roots
+  // are covered by the main world at attachShadow(), so this walk only has to
+  // find declarative roots (and stand in when a CSP drops the main world) —
+  // at most once a second, with a trailing walk so nothing is missed.
+  const SHADOW_WALK_MS = 1000;
+  let lastShadowWalk = -Infinity, shadowWalkTimer = null;
+  function scheduleShadowWalk() {
+    const now = performance.now();
+    if (now - lastShadowWalk >= SHADOW_WALK_MS) {
+      lastShadowWalk = now;
+      coverOpenShadowRoots(document);
+    } else if (!shadowWalkTimer) {
+      shadowWalkTimer = setTimeout(() => {
+        shadowWalkTimer = null;
+        lastShadowWalk = performance.now();
+        coverOpenShadowRoots(document);
+      }, SHADOW_WALK_MS - (now - lastShadowWalk));
+    }
+  }
+  function liveCoveredRoots() {
+    const out = [];
+    for (const ref of coveredRoots) { const r = ref.deref(); if (r) out.push(r); }
+    return out;
+  }
+  function uncoverShadowRoots() {
+    for (const root of liveCoveredRoots()) {
+      try {
+        if (shadowSheet && root.adoptedStyleSheets) {
+          root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== shadowSheet);
+        }
+        root.querySelectorAll(':scope > style[data-still-shadow]').forEach((st) => st.remove());
+      } catch (e) {}
+      root.__stillCovered = false;
+    }
+    coveredRoots.length = 0;
+  }
+  function cancelAnimationsIn(root) {
+    try {
+      for (const child of root.children) {
+        for (const a of child.getAnimations({ subtree: true })) neutralizeAnimation(a);
+      }
+    } catch (e) {}
+  }
+
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
   // --- Per-host CSS rule pack ---
@@ -220,9 +365,20 @@
         if (!enabled || siteAllowed) document.documentElement.setAttribute('data-still-off', '');
         else document.documentElement.removeAttribute('data-still-off');
       } catch (e) {}
+      // data-still-on: "state resolved and protection active". The main-world
+      // play() refusal waits for this rather than treating a missing
+      // data-still-off as on — a rejected play() can't be undone the way an
+      // early canvas freeze can, so an allowlisted site must never see one
+      // in the ms before storage answers.
+      try {
+        if (enabled && !siteAllowed) document.documentElement.setAttribute('data-still-on', '');
+        else document.documentElement.removeAttribute('data-still-on');
+      } catch (e) {}
 
       if (!enabled || siteAllowed) {
         style.remove();
+        shadowTemplate.remove();
+        uncoverShadowRoots();
         // Also drop the per-host CSS rule pack — otherwise allowlisting a
         // site that has a host-rules entry (e.g. president.mit.edu) would
         // leave the curtain bars permanently pinned at left:100%, since the
@@ -1158,6 +1314,7 @@
   }
 
   function scanAll() {
+    scheduleShadowWalk();
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();
@@ -1809,12 +1966,21 @@
           // state on any foreign write: the isolated world has equal DOM
           // authority, so the page cannot win this exchange.
           if (target === document.documentElement &&
-              mutation.attributeName === 'data-still-off') {
+              (mutation.attributeName === 'data-still-off' ||
+               mutation.attributeName === 'data-still-on')) {
             const wantOff = !enabled || siteAllowed;
             if (wantOff !== target.hasAttribute('data-still-off')) {
               try {
                 if (wantOff) target.setAttribute('data-still-off', '');
                 else target.removeAttribute('data-still-off');
+              } catch (e) {}
+            }
+            // data-still-on is the main-world play() refusal's readiness
+            // signal; a page clearing it would switch video protection off.
+            if (wantOff === target.hasAttribute('data-still-on')) {
+              try {
+                if (wantOff) target.removeAttribute('data-still-on');
+                else target.setAttribute('data-still-on', '');
               } catch (e) {}
             }
             continue;
@@ -1879,7 +2045,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off']
+      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off', 'data-still-on']
     });
 
   }
@@ -1919,15 +2085,59 @@
         neutralizeAnimation(a);
       }
     } catch (e) {}
+    for (const root of liveCoveredRoots()) cancelAnimationsIn(root);
   }
 
+
+  // Chained-animation guard. A page that sequences finite animations through
+  // their finished promises (or restarts a CSS animation on animationend)
+  // spins forever once each one finishes instantly: finish → promise resolves
+  // in a microtask → next animate() → finish → … with no frame in between,
+  // and the main thread never yields (measured: page.evaluate hung). After a
+  // burst of neutralizations on the same element, cancel() instead — the
+  // finished promise rejects, no animationend fires, and the chain stops with
+  // the element in its resting style. (StopTheMadness's "Protect animation
+  // end" exists for the same reason.)
+  // Two tiers, both counting only GENUINE new starts (neutralizeAnimation
+  // returns early for an already-finished animation, so the repeated timed /
+  // mutation-driven passes over the same snapped animation never count — they
+  // used to, and a plain `opacity:0; animation: fadeIn 1s forwards` hero got
+  // cancel()ed back to invisible after five passes inside a second):
+  //  - same task: a finished-promise chain spins in microtasks, so more than
+  //    BURST_TASK_N starts on one element before a macrotask runs is a spin;
+  //  - per second: an animationend-restart loop yields a frame each lap, so it
+  //    needs a time window — set well above legitimate rapid UI (a progress
+  //    bar animating on every progress event runs ~10/s).
+  const BURST_TASK_N = 8, BURST_N = 20, BURST_MS = 1000;
+  const bursts = new WeakMap(); // target el -> { n, t0, taskN, epoch }
+  let burstEpoch = 0, burstEpochArmed = false;
+  function inBurst(a) {
+    try {
+      const el = a.effect && a.effect.target;
+      if (!el) return false;
+      if (!burstEpochArmed) {
+        burstEpochArmed = true;
+        setTimeout(() => { burstEpoch++; burstEpochArmed = false; }, 0);
+      }
+      const t = performance.now();
+      let b = bursts.get(el);
+      if (!b || t - b.t0 > BURST_MS) { b = { n: 0, t0: t, taskN: 0, epoch: burstEpoch }; bursts.set(el, b); }
+      if (b.epoch !== burstEpoch) { b.epoch = burstEpoch; b.taskN = 0; }
+      b.n++; b.taskN++;
+      return b.taskN > BURST_TASK_N || b.n > BURST_N;
+    } catch (e) { return false; }
+  }
   function neutralizeAnimation(a) {
     try {
+      // Already snapped to its end (by us, or naturally): nothing to do, and it
+      // must not feed the burst counter — fill:forwards keeps a finished
+      // animation in getAnimations(), so every later pass sees it again.
+      if (a.playState === 'finished') return;
       const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
         ? a.effect.getComputedTiming()
         : null;
       const iterations = timing && timing.iterations;
-      if (iterations === Infinity) {
+      if (iterations === Infinity || inBurst(a)) {
         a.cancel();
       } else if (a.effect && typeof a.effect.updateTiming === 'function') {
         // Force fill to forwards so the end state persists post-finish,
@@ -2010,6 +2220,7 @@
       isMotionExempt: (el) => motionExempt.has(el),
       releaseAllMotion,
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
+      coverShadowRoot, shadowRootCovered, liveCoveredRoots,
       isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
       checkOpenProbe, matchesHide, probeCache,
     };
