@@ -451,15 +451,51 @@ test.describe('JS-driven motion is withheld', () => {
     expect(r.left).toBe('300px');                 // the loop ran to completion…
     expect(r.tf).toBe('translateX(300px)');
     expect(r.rendered).toBe(300);                 // …and the element landed there
-    // …without the 30 intermediate positions ever rendering: start, at most the
-    // two or three 10px frames that paint before ANY run is recognised (the
-    // detection cost every JS animation pays once), and the end.
-    expect(r.seenLeft).toBeLessThanOrEqual(5);
-    expect(r.seenTf).toBeLessThanOrEqual(5);
+    // …without ANY of the 30 intermediate positions ever rendering: only the
+    // start and the end. The first write is held provisionally, so not even
+    // the early frames before a run is recognised are painted.
+    expect(r.seenLeft).toBeLessThanOrEqual(2);
+    expect(r.seenTf).toBeLessThanOrEqual(2);
     expect(r.stepper).toBe(true);
     expect(r.exempt).toBe(false);                 // held, not handed back
     expect(r.heldAttr).toBe(false);               // hold released on settle
     expect(r.rules).toBe('');
+  });
+
+  test('a first-time rAF zoom-in entrance paints no intermediate frame: hidden, then final', async ({ page }) => {
+    await setup(page);
+    const r = await page.evaluate(async () => {
+      const el = document.createElement('h2'); el.textContent = 'zoom'; el.style.cssText = 'width:300px;opacity:0;transform:scale(.6)';
+      document.body.appendChild(el);
+      await new Promise((res) => setTimeout(res, 100));
+      const seen = new Set(); let sampling = true;
+      (function s() { seen.add(Math.round(el.getBoundingClientRect().width) + '/' + (+getComputedStyle(el).opacity).toFixed(2)); if (sampling) requestAnimationFrame(s); })();
+      const t0 = performance.now();
+      await new Promise((done) => { (function f(now) { const t = Math.min(1, (now - t0) / 700); el.style.opacity = String(t); el.style.transform = 'scale(' + (0.6 + 0.4 * t) + ')'; if (t < 1) requestAnimationFrame(f); else done(); })(performance.now()); });
+      await new Promise((res) => setTimeout(res, 400)); sampling = false;
+      return { seen: [...seen], final: Math.round(el.getBoundingClientRect().width) + '/' + (+getComputedStyle(el).opacity).toFixed(2) };
+    });
+    expect(r.final).toBe('300/1.00');
+    expect(r.seen.sort()).toEqual(['180/0.00', '300/1.00']); // never visible at the small scale
+  });
+
+  test('a loop that starts transparent is not left invisible: shown after the rescue window', async ({ page }) => {
+    await setup(page);
+    const r = await page.evaluate(async () => {
+      const el = document.createElement('div'); el.textContent = 'pulse'; el.style.cssText = 'width:80px;opacity:0';
+      document.body.appendChild(el);
+      await new Promise((res) => setTimeout(res, 100));
+      const t0 = performance.now();
+      (function f(now) { el.style.opacity = String(0.5 + 0.5 * Math.sin((now - t0) / 200)); requestAnimationFrame(f); })(performance.now());
+      await new Promise((res) => setTimeout(res, 600));
+      const early = getComputedStyle(el).opacity;
+      await new Promise((res) => setTimeout(res, 1900));
+      const seen = new Set(); const s0 = performance.now();
+      await new Promise((res) => { (function s() { seen.add(getComputedStyle(el).opacity); if (performance.now() - s0 < 400) requestAnimationFrame(s); else res(); })(); });
+      return { early, late: [...seen] };
+    });
+    expect(r.early).toBe('0');       // held where it started, no pulsing
+    expect(r.late).toEqual(['1']);   // then shown, steady — never left hidden
   });
 
   test('a known read-back stepper is held from its first write the next time it runs', async ({ page }) => {
@@ -523,10 +559,13 @@ test.describe('JS-driven motion is withheld', () => {
     expect(await page.evaluate(() => window.countBgStates('slowsprite', 1200))).toBeLessThanOrEqual(2);
   });
 
-  test('a positioner writing several times inside one frame is not an animation', async ({ page }) => {
+  test('a positioner writing several times inside one frame is not an animation: it lands once, after the provisional hold', async ({ page }) => {
     await setup(page);
     const r = await page.evaluate(async () => {
       const el = document.getElementById('tip');
+      const start = Math.round(el.getBoundingClientRect().left);
+      const seen = new Set(); let sampling = true;
+      (function s() { seen.add(Math.round(el.getBoundingClientRect().left)); if (sampling) requestAnimationFrame(s); })();
       el.style.transform = 'translate(10px, 10px)';
       await Promise.resolve(); await new Promise((res) => queueMicrotask(res));
       el.style.transform = 'translate(200px, 80px)';
@@ -534,13 +573,18 @@ test.describe('JS-driven motion is withheld', () => {
       el.style.transform = 'translate(220px, 90px)';
       await Promise.resolve(); await new Promise((res) => queueMicrotask(res));
       el.style.opacity = '1';
-      await new Promise(requestAnimationFrame);
+      await new Promise((res) => setTimeout(res, 200)); // past MOTION_PROVISIONAL_MS
+      sampling = false;
       const b = el.getBoundingClientRect();
-      return { left: Math.round(b.left), withheld: window.__still.isMotionWithheld(el), self: window.__still.isSelfAnimator(el) };
+      return { start, left: Math.round(b.left), seen: [...seen], withheld: window.__still.isMotionWithheld(el), self: window.__still.isSelfAnimator(el), tf: el.style.transform };
     });
     expect(r.withheld).toBe(false);
     expect(r.self).toBe(false);
-    expect(r.left).toBe(220);
+    expect(r.tf).toBe('translate(220px, 90px)');
+    expect(r.left).toBe(r.start + 220);
+    // Rendered only where it started and where it ended up — never at the
+    // intermediate 10px / 200px positions.
+    expect(r.seen.sort((a, b) => a - b)).toEqual([r.start, r.start + 220]);
   });
 
   test('a known self-animator is withheld from its FIRST frame (no forward-forward-snap-back)', async ({ page }) => {

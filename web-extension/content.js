@@ -1502,6 +1502,16 @@
   // mid-tween would strand it half-transparent and offset.
 
   const MOTION_RUN_THRESHOLD = 3;   // distinct-frame writes => it's animating
+  // A run used to be recognised only after MOTION_RUN_THRESHOLD frames had
+  // PAINTED: the element moved two or three small steps, snapped back, then
+  // jumped to the end. Brief, but it is motion, and it happened at the start
+  // of every first-time script animation (every zoom-in entrance, every
+  // accordion). Now the very first motion write is held PROVISIONALLY: if no
+  // run develops within this window the value simply lands (a one-off style
+  // change arrives ~50ms late, which is delay, not motion); if one does, not a
+  // single intermediate frame was ever rendered. Longer than two 30fps frames
+  // so a slow rAF loop confirms before the window closes.
+  const MOTION_PROVISIONAL_MS = 50;
   const MOTION_FRAME_GAP_MS = 5;    // writes closer than this are one frame (a
                                     // tooltip positioner's three microtask-
                                     // separated writes are not an animation)
@@ -1559,31 +1569,37 @@
       holdStyleEl.textContent = [...holdRules.values()].join('\n');
     } catch (e) {}
   }
+  function writeHoldRule(id, decls) {
+    const parts = [];
+    for (const [p, v] of decls) parts.push(p + ': ' + v + ' !important');
+    holdRules.set(id, '[data-still-hold="' + id + '"] { ' + parts.join('; ') + '; }');
+    renderHoldRules();
+  }
   // Switch a run from "revert the inline value" to "pin the rendered look".
   // `cur` is the page's own latest inline state, which is handed back to it.
   function beginCssHold(el, run, cur) {
     try {
       if (el.getRootNode() !== document) return false;
-      if (!run.withholding) {
-        // Inline currently shows the page's newest frame; put the held look in
-        // place for a moment so it can be measured (never painted: this all
-        // happens inside one observer callback).
-        for (const p of run.props) {
-          const held = heldValueFor(run, p);
-          if (held && held[0]) el.style.setProperty(p, held[0], held[1]);
-          else el.style.removeProperty(p);
-        }
+      // Inline currently shows the page's newest frame — also when the run is
+      // already being withheld, because this is called before this round's
+      // revert (measuring without reverting pinned the FIRST STEP, not the
+      // start). Put the held look in place for a moment so it can be measured;
+      // never painted: this all happens inside one observer callback.
+      for (const p of run.props) {
+        const held = heldValueFor(run, p);
+        if (held && held[0]) el.style.setProperty(p, held[0], held[1]);
+        else el.style.removeProperty(p);
       }
       const cs = getComputedStyle(el);
-      const decls = [];
+      const decls = new Map();
       for (const p of run.props) {
         const v = cs.getPropertyValue(p);
-        if (v) decls.push(p + ': ' + v + ' !important');
+        if (v) decls.set(p, v);
       }
-      if (!decls.length) return false;
+      if (!decls.size) return false;
       const id = String(++holdSeq);
-      holdRules.set(id, '[data-still-hold="' + id + '"] { ' + decls.join('; ') + '; }');
-      renderHoldRules();
+      run.holdDecls = decls;
+      writeHoldRule(id, decls);
       el.setAttribute('data-still-hold', id);
       el.setAttribute('data-still-motion', 'held');
       // Give the page its own values back: from here on it reads what it wrote.
@@ -1748,6 +1764,30 @@
     styleSnaps.set(el, snapshotStyle(el));
   }
 
+  // A provisional hold that no run grew out of: apply what the page asked for
+  // and keep the run alive, un-withheld, as a frame COUNTER for
+  // MOTION_RUN_RESET_MS — a slow ticker (one write every 150ms) still has to
+  // be able to add up to a run across several of these.
+  function landProvisional(el, run) {
+    run.timer = null;
+    if (motionRuns.get(el) !== run || !run.provisional) return;
+    try {
+      for (const [p, [v, prio]] of run.virtual) {
+        if (v) el.style.setProperty(p, v, prio);
+        else el.style.removeProperty(p);
+      }
+      el.removeAttribute('data-still-motion');
+    } catch (e) {}
+    run.provisional = false;
+    run.withholding = false;
+    run.echo = null;
+    const landed = snapshotStyle(el);
+    styleSnaps.set(el, landed);
+    setPreRun(run, landed);         // this state painted: the new rewind point
+    run.virtual.clear(); run.virtualPrev.clear();
+    run.timer = setTimeout(() => { if (motionRuns.get(el) === run && !run.withholding) motionRuns.delete(el); }, MOTION_RUN_RESET_MS);
+  }
+
   function armMotionSettle(el, run) {
     if (run.timer) clearTimeout(run.timer);
     // A withheld run ends after a quiet period scaled to its own cadence: a
@@ -1756,6 +1796,10 @@
     // is only being counted lives for MOTION_RUN_RESET_MS, so a slow stepper
     // can accumulate frames at all (it used to be torn down at 120ms, which
     // left MOTION_RUN_RESET_MS dead and anything under ~8fps undetected).
+    if (run.provisional) {
+      run.timer = setTimeout(() => { landProvisional(el, run); }, MOTION_PROVISIONAL_MS);
+      return;
+    }
     const ms = (run.withholding || run.cssHold)
       ? Math.min(MOTION_SETTLE_MAX_MS, Math.max(MOTION_SETTLE_MS, run.gap * 2.5))
       : MOTION_RUN_RESET_MS;
@@ -1775,13 +1819,23 @@
   // instead of fading. Either way the settle applies the page's real
   // destination, so a tween that genuinely ends part-transparent still gets
   // there.
+  //
+  // The rescue waits OPACITY_RESCUE_MS, though. Applied at once, an entrance
+  // that fades AND scales in ("text zooms into place") showed the text
+  // immediately at its small starting scale and then jumped it to full size
+  // when the run settled — a visible zoom in one hop. Almost every entrance is
+  // over well inside this window, so the element stays hidden and then simply
+  // appears in its final state; only a run still going after it (a loop) gets
+  // the rescue, which is the case it exists for.
   const OPAQUE_ENOUGH = 0.9;
+  const OPACITY_RESCUE_MS = 2000;
 
   function heldValueFor(run, prop) {
     const pre = run.preRun.get(prop);
     if (prop !== 'opacity') return pre;
     const n = pre && pre[0] !== '' ? parseFloat(pre[0]) : NaN;
     if (isNaN(n) || n >= OPAQUE_ENOUGH) return pre;
+    if (performance.now() - run.startedAt < OPACITY_RESCUE_MS) return pre;
     return ['1', ''];
   }
 
@@ -1819,6 +1873,13 @@
         run.lastFrameAt = now;
       }
       run.lastAt = now;
+      // Same rescue as heldValueFor: a loop still running after the window
+      // must not keep content pinned invisible.
+      const op = run.holdDecls && run.holdDecls.get('opacity');
+      if (op !== undefined && parseFloat(op) < OPAQUE_ENOUGH && now - run.startedAt >= OPACITY_RESCUE_MS) {
+        run.holdDecls.set('opacity', '1');
+        writeHoldRule(run.cssHold, run.holdDecls);
+      }
       armMotionSettle(el, run);
       return false;
     }
@@ -1828,8 +1889,14 @@
     // the page last asked for, or it sticks under their finger. A run that was
     // already being withheld BEFORE the press is not the thing being dragged —
     // a selection drag must not un-freeze every loop on the page.
-    if (isDragging(now) && !(withholding && run.startedAt < pointerDownAt)) {
-      if (run) landMotionRun(el, run);
+    if (isDragging(now) && !(withholding && !run.provisional && run.startedAt < pointerDownAt)) {
+      if (run) {
+        // Land at what the page is asking for NOW, not at the last value the
+        // run recorded — this write has not been folded into it yet.
+        for (const p of run.props) run.virtual.set(p, [cur.get(p) || '', prioOf(cur, p)]);
+        run.virtualPrev.clear();
+        landMotionRun(el, run);
+      }
       motionRuns.delete(el);
       return false;
     }
@@ -1887,7 +1954,7 @@
     if (newFrame) {
       if (run.lastFrameAt !== -Infinity) run.gap = now - run.lastFrameAt;
       run.lastFrameAt = now;
-      if (!run.withholding) run.frames++;
+      if (!run.withholding || run.provisional) run.frames++;
     }
     run.lastAt = now;
     for (const p of moving) run.props.add(p);
@@ -1931,15 +1998,21 @@
       }
     }
 
-    if (!run.withholding) {
-      // An element already known to animate on its own clock is withheld from
-      // its very first frame; anything else has to show a sustained run first.
-      const known = selfAnimators.has(el);
-      if (known || run.frames >= MOTION_RUN_THRESHOLD) {
+    // An element already known to animate on its own clock, or one that has
+    // now shown a sustained run, is CONFIRMED: withheld until its writes stop.
+    // Anything else is held provisionally from its first write (see
+    // MOTION_PROVISIONAL_MS) so that no early frame ever paints. Runs that grew
+    // out of scroll-response writes are the exception — those frames are
+    // meant to paint, so they still have to show a sustained run first.
+    const known = selfAnimators.has(el);
+    const confirmed = known || run.frames >= MOTION_RUN_THRESHOLD;
+    if (!run.withholding || run.provisional) {
+      if (confirmed) {
         // A run that grew out of scroll-response writes holds at the last
         // state that was painted — rewinding further would move it backwards.
-        if (run.scrollFed && !known) setPreRun(run, prev);
+        if (run.scrollFed && !known && !run.withholding) setPreRun(run, prev);
         run.withholding = true;
+        run.provisional = false;
         // Reaching here means the element was animating while the page was
         // NOT scrolling: it runs on its own clock. Remember that, so the next
         // scroll through this page withholds it from its very first frame
@@ -1948,6 +2021,10 @@
         try { el.setAttribute('data-still-motion', 'withheld'); } catch (e) {}
       } else if (run.scrollFed) {
         setPreRun(run, cur);  // still counting: this frame paints
+      } else if (!run.withholding) {
+        run.withholding = true;
+        run.provisional = true;
+        try { el.setAttribute('data-still-motion', 'provisional'); } catch (e) {}
       }
     }
 
