@@ -43,6 +43,17 @@
       return !!(de && de.hasAttribute('data-still-off'));
     } catch (e) { return false; }
   }
+  // `data-still-on` is content.js's "state resolved, protection active" signal
+  // (set once storage answers enabled && !allowlisted; defended against page
+  // writes like data-still-off). Playback refusal below waits for it: the
+  // canvas/SVG paths can undo an early false positive, a rejected play()
+  // promise cannot, so an allowlisted site must never see one.
+  function stillOn() {
+    try {
+      const de = document.documentElement;
+      return !!(de && de.hasAttribute('data-still-on') && !de.hasAttribute('data-still-off'));
+    } catch (e) { return false; }
+  }
 
   // --- Smooth-scroll neutering ---
   // A programmatic smooth scroll is animation: the page glides to a new
@@ -400,6 +411,7 @@
   var MW_CLICK_PAD_PX = 40;
   try {
     document.addEventListener('pointerdown', function (e) {
+      if (e.isTrusted === false) return;
       mwPointerAt = performance.now();
       mwPointerX = e.clientX + window.scrollX; mwPointerY = e.clientY + window.scrollY;
       mwPointerHref = location.href;
@@ -407,6 +419,7 @@
   } catch (e) {}
   try {
     document.addEventListener('touchstart', function (e) {
+      if (e.isTrusted === false) return;
       mwPointerAt = performance.now();
       var t = e.touches && e.touches[0];
       if (t) { mwPointerX = t.clientX + window.scrollX; mwPointerY = t.clientY + window.scrollY; }
@@ -415,6 +428,7 @@
   } catch (e) {}
   try {
     document.addEventListener('keydown', function (e) {
+      if (e.isTrusted === false) return;
       if (e.key !== 'Escape') mwKeyAt = performance.now();
     }, { capture: true, passive: true });
   } catch (e) {}
@@ -432,7 +446,10 @@
     // gesture recorded" shouldn't happen — fail closed if it somehow does;
     // content.js's own gesture tracker is the second chance.
     if (mwPointerAt === -Infinity && mwKeyAt === -Infinity) return false;
-    if (mwKeyAt >= mwPointerAt) return true;
+    // Same rule as content.js gestureAuthorizesPlay: a recent key authorizes
+    // regardless of a later click elsewhere — a refused play() can't be undone,
+    // so this world must never be the stricter of the two.
+    if (mwKeyAt >= mwPointerAt || performance.now() - mwKeyAt < 2000) return true;
     var r = null;
     try { r = v.getBoundingClientRect(); } catch (e) {}
     if (r && r.width > 0 && r.height > 0) {
@@ -473,15 +490,370 @@
     // a real gesture — so script-driven autoplay retries don't qualify. It is
     // page-global, though, so additionally require the gesture to be scoped to
     // this video (see mwGestureAuthorizes above).
+    let gestured = false;
     try {
-      if (typeof navigator !== 'undefined' && navigator.userActivation &&
-          navigator.userActivation.isActive && this.setAttribute &&
-          mwGestureAuthorizes(this)) {
-        this.setAttribute('data-still-user-play', '');
+      gestured = !!(this.setAttribute && mwActivationActive() && mwGestureAuthorizes(this));
+      if (gestured) this.setAttribute('data-still-user-play', '');
+    } catch (e) {}
+    // Ungestured <video> playback is REFUSED here, in the page world, rather
+    // than paused after the fact by content.js's play listener. Two reasons.
+    // Reach: a prototype patch sees every <video>, including ones inside
+    // shadow roots, where content.js's document-level listeners and
+    // querySelectorAll are blind (nytimes.com's betamax web components are
+    // the canonical case — Still had zero effect on them). Shape: pausing
+    // AFTER the play event fights players that re-call play() whenever
+    // playback stops unexpectedly; measured on nytimes.com 2026-09-11, that
+    // fight is ~1,200 play() calls per scroll pass with the play button's
+    // `display` toggling ~120 times per 1.5s — a strobe, the opposite of
+    // what Still is for. Rejecting with NotAllowedError is exactly what the
+    // browser's own autoplay policy does, and players already handle it:
+    // they settle into their poster/paused state and stop retrying.
+    // Gated on stillOn() (state resolved + enabled + not allowlisted) — see
+    // the note above stillOn(). content.js's play listener stays as the
+    // backstop for pages whose CSP drops this world.
+    try {
+      if (this.tagName === 'VIDEO' && !gestured && stillOn() &&
+          !this.hasAttribute('data-still-user-play')) {
+        try { origMediaPause.call(this); } catch (e) {}
+        return Promise.reject(mwNotAllowed());
       }
     } catch (e) {}
     return origMediaPlay.apply(this, arguments);
   };
+  const origMediaPause = HTMLMediaElement.prototype.pause;
+  function mwNotAllowed() {
+    const msg = 'play() failed because the user didn\'t interact with the document first. (Still)';
+    try { return new DOMException(msg, 'NotAllowedError'); } catch (e) {
+      const err = new Error(msg); err.name = 'NotAllowedError'; return err;
+    }
+  }
+  // "A gesture happened recently": the browser's transient activation bit,
+  // OR a trusted pointer/key event seen by our own capture-phase listeners
+  // inside content.js's 2s window. The second half matters because the
+  // refusal must not be stricter than content.js's own gesture rule (a real
+  // click followed by an SPA navigation, or a document-level keyboard
+  // shortcut, authorizes a play in content.js and must here too), and it
+  // covers engines without navigator.userActivation. Scope still comes from
+  // mwGestureAuthorizes, so this never widens WHICH video a gesture unlocks.
+  function mwActivationActive() {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.userActivation &&
+          navigator.userActivation.isActive) return true;
+    } catch (e) {}
+    return mwRecentInput();
+  }
+  function mwRecentInput() {
+    const t = performance.now();
+    return (t - mwPointerAt < 2000) || (t - mwKeyAt < 2000);
+  }
+
+  // --- Shadow-root media guard ---
+  // Media events don't compose, so nothing dispatched on a <video> inside a
+  // shadow root ever reaches content.js's document-level play/loadstart
+  // listeners. The play() refusal above covers script-driven playback there;
+  // this covers the rest — an `autoplay` attribute the browser honours
+  // natively (no play() call), and the per-load user-play mark hygiene that
+  // content.js does for light-DOM videos. Any retry the player makes after
+  // our pause goes through play() and gets a clean refusal, so this cannot
+  // start the pause-after-play fight described above. Roots created before
+  // this patch ran (declarative shadow DOM) are not covered.
+  function guardShadowRoot(root) {
+    try {
+      root.addEventListener('play', function (e) {
+        const v = e.target;
+        if (!v || v.tagName !== 'VIDEO' || !stillOn()) return;
+        if (v.hasAttribute('data-still-user-play')) return;
+        if (mwActivationActive() && mwGestureAuthorizes(v)) {
+          try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
+          return;
+        }
+        try { origMediaPause.call(v); } catch (err) {}
+      }, true);
+      root.addEventListener('loadstart', function (e) {
+        const v = e.target;
+        if (!v || v.tagName !== 'VIDEO') return;
+        try { v.__stillMwLoadstartAt = performance.now(); } catch (err) {}
+        if (mwRecentInput()) return;
+        try { v.removeAttribute('data-still-user-play'); } catch (err) {}
+        if (!stillOn()) return;
+        try { origMediaPause.call(v); } catch (err) {}
+      }, true);
+    } catch (e) {}
+  }
+  // --- Shadow-root motion coverage ---
+  // content.js's transition kill is a document stylesheet and its animation
+  // cancellation walks the document — neither crosses a shadow boundary, so
+  // web-component UI was fully unprotected (gap-probe.mts, 2026-09-12). This
+  // world sees every attachShadow() call, open or closed, so it adopts the
+  // shared motion-kill sheet into each new root and listens for
+  // animationstart there. The CSS text comes from the template <style> that
+  // content.js publishes (single source of truth); a small fallback covers
+  // the case where content.js hasn't run yet. content.js separately covers
+  // declarative roots it finds during scans; the marker rule keeps the two
+  // writers from double-covering a root.
+  const SHADOW_CSS_FALLBACK = [
+    '#-still-shadow-marker { --still: 1; }',
+    '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    // Specificity armor, same as content.js: a component sheet declaring
+    // `transition: … !important` on an id/class selector beats the bare `*`.
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    'svg [data-still-svg-settling] { visibility: hidden !important; }',
+    'video[data-still-video="blocked"] { display: none !important; }'
+  ].join('\n');
+  let mwShadowSheet = null;
+  let mwSheetFromTemplate = false; // fallback text is replaced once the template exists
+  const mwKnownRoots = [];   // WeakRefs to every root ever attached — never cleared, so a
+                             // data-still-off blip can be followed by a re-cover
+  const mwListenerRoots = new WeakSet();
+  const mwCoveredRoots = []; // WeakRefs (no strong element Set — SPA-leak lesson)
+  const mwCoveredSet = new WeakSet(); // roots we adopted the sheet into
+  function mwShadowCss() {
+    try {
+      const t = document.getElementById('__still-shadow-css');
+      if (t && t.textContent) return t.textContent;
+    } catch (e) {}
+    return SHADOW_CSS_FALLBACK;
+  }
+  function mwRootCovered(root) {
+    try {
+      for (const sh of root.adoptedStyleSheets || []) {
+        try { if (sh.cssRules[0] && sh.cssRules[0].selectorText === '#-still-shadow-marker') return true; } catch (e) {}
+      }
+      return !!root.querySelector(':scope > style[data-still-shadow]');
+    } catch (e) { return false; }
+  }
+
+  // Chained-animation guard. A page that sequences finite animations through
+  // their finished promises (or restarts a CSS animation on animationend)
+  // spins forever once each one finishes instantly: finish → promise resolves
+  // in a microtask → next animate() → finish → … with no frame in between,
+  // and the main thread never yields (measured: page.evaluate hung). After a
+  // burst of neutralizations on the same element, cancel() instead — the
+  // finished promise rejects, no animationend fires, and the chain stops with
+  // the element in its resting style. (StopTheMadness's "Protect animation
+  // end" exists for the same reason.)
+  // Two tiers, counting only genuine new starts (see content.js inBurst): a
+  // same-task tier for finished-promise chains that spin in microtasks, and a
+  // per-second tier for animationend-restart loops — set above legitimate
+  // rapid UI (an upload bar calling animate() on every progress event, ~10/s,
+  // froze at its 4th value under the old 4-per-second limit).
+  const MW_BURST_TASK_N = 8, MW_BURST_N = 20, MW_BURST_MS = 1000;
+  const mwBursts = new WeakMap(); // target el -> { n, t0, taskN, epoch }
+  const mwSetTimeout = window.setTimeout.bind(window);
+  let mwBurstEpoch = 0, mwBurstEpochArmed = false;
+  function mwInBurst(a) {
+    try {
+      const el = a.effect && a.effect.target;
+      if (!el) return false;
+      if (!mwBurstEpochArmed) {
+        mwBurstEpochArmed = true;
+        mwSetTimeout(function () { mwBurstEpoch++; mwBurstEpochArmed = false; }, 0);
+      }
+      const t = performance.now();
+      let b = mwBursts.get(el);
+      if (!b || t - b.t0 > MW_BURST_MS) { b = { n: 0, t0: t, taskN: 0, epoch: mwBurstEpoch }; mwBursts.set(el, b); }
+      if (b.epoch !== mwBurstEpoch) { b.epoch = mwBurstEpoch; b.taskN = 0; }
+      b.n++; b.taskN++;
+      return b.taskN > MW_BURST_TASK_N || b.n > MW_BURST_N;
+    } catch (e) { return false; }
+  }
+  function mwNeutralizeAnimation(a) {
+    // Mirror of content.js neutralizeAnimation: infinite → cancel (no end
+    // state to show); finite → fill:forwards + finish (snap to the end).
+    try {
+      if (a.playState === 'finished') return; // already snapped; don't count it
+      const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
+        ? a.effect.getComputedTiming() : null;
+      if ((timing && timing.iterations === Infinity) || mwInBurst(a)) {
+        a.cancel();
+      } else if (a.effect && typeof a.effect.updateTiming === 'function') {
+        // The fill upgrade is for CSS animations/transitions only. A
+        // script-created animation keeps the fill its author chose: a filled
+        // animation outranks every later inline-style and class write, so an
+        // upgraded fade-out left a toast at opacity 0 forever after the page
+        // re-showed it with `style.opacity = 1`. Without the upgrade finish()
+        // lands exactly where the unblocked browser ends up — the base style,
+        // plus whatever the page's own onfinish handler sets.
+        const cssDriven = (typeof CSSAnimation === 'function' && a instanceof CSSAnimation) ||
+          (typeof CSSTransition === 'function' && a instanceof CSSTransition);
+        if (cssDriven) { try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {} }
+        a.finish();
+      } else {
+        a.cancel();
+      }
+    } catch (e) {
+      try { a.cancel(); } catch (e2) {}
+    }
+  }
+  function mwRefreshSheetText() {
+    // The sheet may have been built from the fallback (first attachShadow ran
+    // before content.js published its template). One shared sheet serves every
+    // root, so swapping its text once upgrades them all.
+    if (!mwShadowSheet || mwSheetFromTemplate) return;
+    try {
+      const t = document.getElementById('__still-shadow-css');
+      if (t && t.textContent) { mwShadowSheet.replaceSync(t.textContent); mwSheetFromTemplate = true; }
+    } catch (e) {}
+  }
+  function mwCoverShadowRoot(root) {
+    if (!mwListenerRoots.has(root)) {
+      mwListenerRoots.add(root);
+      if (typeof WeakRef === 'function') mwKnownRoots.push(new WeakRef(root));
+      try {
+        root.addEventListener('animationstart', function (e) {
+          // finish()/cancel() can't be undone, so wait for content.js's
+          // "state resolved, protection active" signal like the animate() wrap
+          // does — an allowlisted site must never lose an animation to the
+          // startup race. Anything that started before the signal is swept
+          // once when it appears (mwSweepKnownRoots).
+          if (!stillOn()) return;
+          const t = e.target;
+          if (!t || typeof t.getAnimations !== 'function') return;
+          try { t.getAnimations().forEach(mwNeutralizeAnimation); } catch (err) {}
+        }, true);
+      } catch (e) {}
+    }
+    if (stillOff()) return;
+    mwRefreshSheetText();
+    if (mwRootCovered(root)) return;
+    try {
+      if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
+        if (!mwShadowSheet) {
+          const css = mwShadowCss();
+          mwShadowSheet = new CSSStyleSheet(); mwShadowSheet.replaceSync(css);
+          mwSheetFromTemplate = css !== SHADOW_CSS_FALLBACK;
+        }
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, mwShadowSheet];
+        mwCoveredSet.add(root);
+      } else {
+        const st = document.createElement('style');
+        st.setAttribute('data-still-shadow', '');
+        st.textContent = mwShadowCss();
+        root.appendChild(st);
+      }
+      if (typeof WeakRef === 'function') mwCoveredRoots.push(new WeakRef(root));
+    } catch (e) {}
+  }
+  // Component libraries assign the whole adopted-sheet list after creating
+  // the root (Lit's adoptStyles: `renderRoot.adoptedStyleSheets = [...]`),
+  // which silently drops the sheet adopted above — measured on kalakendar.com
+  // (Shopify's Lit-based login components): three of six roots had lost it.
+  // Re-append after any assignment that leaves it out. Our own assignments
+  // include the sheet, so this never recurses; the uncover path removes the
+  // root from the set first.
+  try {
+    const d = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'adoptedStyleSheets');
+    if (d && typeof d.set === 'function' && typeof d.get === 'function') {
+      Object.defineProperty(ShadowRoot.prototype, 'adoptedStyleSheets', {
+        configurable: true, enumerable: d.enumerable,
+        get: d.get,
+        set: function (v) {
+          d.set.call(this, v);
+          try {
+            if (mwShadowSheet && mwCoveredSet.has(this) && !stillOff()) {
+              const cur = d.get.call(this);
+              if (Array.prototype.indexOf.call(cur, mwShadowSheet) === -1) d.set.call(this, [...cur, mwShadowSheet]);
+            }
+          } catch (e) {}
+        },
+      });
+    }
+  } catch (e) {}
+  function mwUncoverShadowRoots() {
+    for (const ref of mwCoveredRoots) {
+      const root = ref.deref();
+      if (!root) continue;
+      mwCoveredSet.delete(root);
+      try {
+        if (mwShadowSheet && root.adoptedStyleSheets) {
+          root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== mwShadowSheet);
+        }
+        root.querySelectorAll(':scope > style[data-still-shadow]').forEach((st) => st.remove());
+      } catch (e) {}
+    }
+    mwCoveredRoots.length = 0;
+  }
+  // Re-cover after data-still-off goes away again (content.js reverts a page's
+  // forged write within a task; a user can also toggle off→on), and sweep
+  // animations that began before protection was confirmed — closed roots are
+  // reachable from nowhere else.
+  function mwSweepKnownRoots() {
+    if (!stillOn()) return;
+    mwRefreshSheetText();
+    for (const ref of mwKnownRoots) {
+      const root = ref.deref();
+      if (!root) continue;
+      mwCoverShadowRoot(root);
+      try { if (typeof root.getAnimations === 'function') root.getAnimations().forEach(mwNeutralizeAnimation); } catch (e) {}
+    }
+  }
+  function installShadowOffObserver() {
+    try {
+      new MutationObserver(function () { if (stillOff()) mwUncoverShadowRoots(); else mwSweepKnownRoots(); })
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off', 'data-still-on'] });
+      return true;
+    } catch (e) { return false; }
+  }
+  if (!installShadowOffObserver()) {
+    try { document.addEventListener('DOMContentLoaded', installShadowOffObserver, { once: true }); } catch (e) {}
+  }
+
+  const origAttachShadow = Element.prototype.attachShadow;
+  if (typeof origAttachShadow === 'function') {
+    Element.prototype.attachShadow = function () {
+      const root = origAttachShadow.apply(this, arguments);
+      guardShadowRoot(root);
+      mwCoverShadowRoot(root);
+      return root;
+    };
+  }
+
+  // --- Web Animations API at the source ---
+  // element.animate() fires no animationstart event, so content.js only
+  // caught script-created animations during its timed passes (last at 10s).
+  // A modal that animates itself closed a minute into the page ran untouched
+  // (gap-probe.mts, 2026-09-12). Neutralize at creation instead, and again
+  // after play()/reverse(): a finished animation restarts from the beginning
+  // when played, and reverse() is how many close animations are built.
+  // Gated on stillOn() (state resolved, not allowlisted) because a finish()
+  // can't be undone the way an early canvas freeze can.
+  const origElementAnimate = Element.prototype.animate;
+  if (typeof origElementAnimate === 'function') {
+    // Deferred by one microtask, not done inline: Chrome only queues the
+    // `finish` event if a listener exists at the moment finish() runs, and
+    // `el.animate(...).onfinish = () => el.remove()` attaches its handler
+    // AFTER animate() returns — finishing inline silently dropped every such
+    // callback (toasts and modals that never get removed). A microtask runs
+    // after the caller's synchronous code and still before any frame paints.
+    const mwQueueMicrotask = typeof queueMicrotask === 'function'
+      ? queueMicrotask.bind(window)
+      : function (f) { Promise.resolve().then(f); };
+    Element.prototype.animate = function () {
+      const anim = origElementAnimate.apply(this, arguments);
+      try {
+        if (anim && stillOn()) {
+          mwQueueMicrotask(function () {
+            try { if (stillOn()) mwNeutralizeAnimation(anim); } catch (e) {}
+          });
+        }
+      } catch (e) {}
+      return anim;
+    };
+  }
+  if (typeof Animation === 'function' && Animation.prototype) {
+    ['play', 'reverse'].forEach(function (m) {
+      const orig = Animation.prototype[m];
+      if (typeof orig !== 'function') return;
+      Animation.prototype[m] = function () {
+        const r = orig.apply(this, arguments);
+        try { if (stillOn()) mwNeutralizeAnimation(this); } catch (e) {}
+        return r;
+      };
+    });
+  }
 
   // --- Animated <canvas> freezing ---
   // Canvas animations (WebGL shaders, 2D particle fields, worker/OffscreenCanvas

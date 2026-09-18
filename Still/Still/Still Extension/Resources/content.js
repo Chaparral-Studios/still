@@ -148,6 +148,151 @@
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
 
+  // --- Shadow roots ---
+  // A document stylesheet stops at every shadow boundary, so the transition
+  // kill above never reached web-component UI, and document.getAnimations()
+  // plus the document-level animationstart listener don't see CSS keyframes
+  // running inside shadow trees either (measured 2026-09-12, gap-probe.mts:
+  // both channels ran untouched). Coverage per root: adopt a shared
+  // stylesheet with the motion-kill subset of the rules above (only that
+  // subset — the image pre-hide rules would hide shadow-tree images that
+  // processImage never visits), listen for animationstart on the root, and
+  // include the root in cancelAnimations' timed passes.
+  //
+  // Two writers, by reach: main-world-patch.js covers every root at
+  // attachShadow() time (open or closed) and reads the CSS from the template
+  // element published below; this world covers OPEN roots it finds during
+  // scans — declarative (parser-created) roots never go through
+  // attachShadow, and this path also stands in when a CSP drops the main
+  // world. Each checks the marker rule first so a root is never covered
+  // twice. Closed declarative roots are reachable by neither; accepted.
+  const SHADOW_CSS = [
+    '#-still-shadow-marker { --still: 1; }',
+    '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    'svg [data-still-svg-settling] { visibility: hidden !important; }',
+    'video[data-still-video="blocked"] { display: none !important; }'
+  ].join('\n');
+  // Template for the main world to read: media="not all" keeps it inert in
+  // the document (the document already carries these rules).
+  const shadowTemplate = document.createElement('style');
+  shadowTemplate.id = '__still-shadow-css';
+  shadowTemplate.media = 'not all';
+  shadowTemplate.textContent = SHADOW_CSS;
+  (document.head || document.documentElement).appendChild(shadowTemplate);
+
+  let shadowSheet = null;
+  const coveredRoots = []; // WeakRefs: no strong element Set (the canvas SPA-leak lesson)
+  function shadowRootCovered(root) {
+    try {
+      for (const sh of root.adoptedStyleSheets || []) {
+        try { if (sh.cssRules[0] && sh.cssRules[0].selectorText === '#-still-shadow-marker') return true; } catch (e) {}
+      }
+      return !!root.querySelector(':scope > style[data-still-shadow]');
+    } catch (e) { return false; }
+  }
+  // Listener installation is tracked separately from sheet coverage: an
+  // off→on toggle un-covers and re-covers every root, and a second listener
+  // per root would double-feed the burst guard.
+  const shadowListenerRoots = new WeakSet();
+  function coverShadowRoot(root) {
+    if (!root) return;
+    if (root.__stillCovered) {
+      // A component library may have reassigned adoptedStyleSheets since
+      // (Lit's adoptStyles), dropping the sheet — re-adopt on this scan.
+      if (shadowSheet && !shadowRootCovered(root)) {
+        try { root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet]; } catch (e) {}
+      }
+      // A nested declarative root can arrive after its parent was first
+      // covered (streamed SSR fragments, setHTMLUnsafe); document-level
+      // querySelectorAll never descends here, so walk it on rescans too.
+      coverOpenShadowRoots(root);
+      return;
+    }
+    root.__stillCovered = true;
+    if (typeof WeakRef === 'function') coveredRoots.push(new WeakRef(root));
+    if (!shadowListenerRoots.has(root)) {
+      shadowListenerRoots.add(root);
+      try {
+        root.addEventListener('animationstart', (e) => {
+          if (!enabled || siteAllowed) return;
+          const t = e.target;
+          if (!t || typeof t.getAnimations !== 'function') return;
+          try { for (const a of t.getAnimations()) neutralizeAnimation(a); } catch (err) {}
+        }, { capture: true, passive: true });
+      } catch (e) {}
+    }
+    if (!shadowRootCovered(root)) {
+      try {
+        if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
+          if (!shadowSheet) { shadowSheet = new CSSStyleSheet(); shadowSheet.replaceSync(SHADOW_CSS); }
+          root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet];
+        } else {
+          const st = document.createElement('style');
+          st.setAttribute('data-still-shadow', '');
+          st.textContent = SHADOW_CSS;
+          root.appendChild(st);
+        }
+      } catch (e) {}
+    }
+    cancelAnimationsIn(root);
+    coverOpenShadowRoots(root); // nested roots
+  }
+  function coverOpenShadowRoots(scope) {
+    if (!enabled || siteAllowed) return;
+    try {
+      const nodes = scope.querySelectorAll('*');
+      for (const el of nodes) if (el.shadowRoot) coverShadowRoot(el.shadowRoot);
+    } catch (e) {}
+  }
+  // scanAll runs on every mutation batch; a whole-document walk each time is
+  // the cost scanBackgroundImages already learned to avoid. Imperative roots
+  // are covered by the main world at attachShadow(), so this walk only has to
+  // find declarative roots (and stand in when a CSP drops the main world) —
+  // at most once a second, with a trailing walk so nothing is missed.
+  const SHADOW_WALK_MS = 1000;
+  let lastShadowWalk = -Infinity, shadowWalkTimer = null;
+  function scheduleShadowWalk() {
+    const now = performance.now();
+    if (now - lastShadowWalk >= SHADOW_WALK_MS) {
+      lastShadowWalk = now;
+      coverOpenShadowRoots(document);
+    } else if (!shadowWalkTimer) {
+      shadowWalkTimer = setTimeout(() => {
+        shadowWalkTimer = null;
+        lastShadowWalk = performance.now();
+        coverOpenShadowRoots(document);
+      }, SHADOW_WALK_MS - (now - lastShadowWalk));
+    }
+  }
+  function liveCoveredRoots() {
+    const out = [];
+    for (const ref of coveredRoots) { const r = ref.deref(); if (r) out.push(r); }
+    return out;
+  }
+  function uncoverShadowRoots() {
+    for (const root of liveCoveredRoots()) {
+      try {
+        if (shadowSheet && root.adoptedStyleSheets) {
+          root.adoptedStyleSheets = root.adoptedStyleSheets.filter((sh) => sh !== shadowSheet);
+        }
+        root.querySelectorAll(':scope > style[data-still-shadow]').forEach((st) => st.remove());
+      } catch (e) {}
+      root.__stillCovered = false;
+    }
+    coveredRoots.length = 0;
+  }
+  function cancelAnimationsIn(root) {
+    try {
+      for (const child of root.children) {
+        for (const a of child.getAnimations({ subtree: true })) neutralizeAnimation(a);
+      }
+    } catch (e) {}
+  }
+
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
   // --- Per-host CSS rule pack ---
@@ -220,9 +365,20 @@
         if (!enabled || siteAllowed) document.documentElement.setAttribute('data-still-off', '');
         else document.documentElement.removeAttribute('data-still-off');
       } catch (e) {}
+      // data-still-on: "state resolved and protection active". The main-world
+      // play() refusal waits for this rather than treating a missing
+      // data-still-off as on — a rejected play() can't be undone the way an
+      // early canvas freeze can, so an allowlisted site must never see one
+      // in the ms before storage answers.
+      try {
+        if (enabled && !siteAllowed) document.documentElement.setAttribute('data-still-on', '');
+        else document.documentElement.removeAttribute('data-still-on');
+      } catch (e) {}
 
       if (!enabled || siteAllowed) {
         style.remove();
+        shadowTemplate.remove();
+        uncoverShadowRoots();
         // Also drop the per-host CSS rule pack — otherwise allowlisting a
         // site that has a host-rules entry (e.g. president.mit.edu) would
         // leave the curtain bars permanently pinned at left:100%, since the
@@ -1158,6 +1314,7 @@
   }
 
   function scanAll() {
+    scheduleShadowWalk();
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();
@@ -1204,30 +1361,74 @@
   const styleRuns = new WeakMap();  // el -> { frames, lastWrite }
   const stylePins = new WeakMap();  // el -> Map(customProp -> [value, priority])
 
-  function snapshotStyle(el) {
+  // Map(prop -> value) in CSSOM longhand form. `!important` priorities ride
+  // along on a `prio` side-map (only for the props that have one) so a held or
+  // restored value keeps its importance.
+  function snapshotDecl(s) {
     const m = new Map();
-    const s = el.style;
+    m.prio = null;
     for (let i = 0; i < s.length; i++) {
       const p = s[i];
       m.set(p, s.getPropertyValue(p));
+      if (s.getPropertyPriority(p)) {
+        if (!m.prio) m.prio = new Map();
+        m.prio.set(p, 'important');
+      }
     }
     return m;
   }
+  function snapshotStyle(el) { return snapshotDecl(el.style); }
+  function prioOf(snap, p) { return (snap && snap.prio && snap.prio.get(p)) || ''; }
 
-  function handleStyleMutation(el) {
+  // The observer hands us the style attribute as it was BEFORE the write.
+  // Seeding the first observation from that is what lets a run be rewound to
+  // the element's true resting state rather than to the animation's own first
+  // frame — without it the first frame is painted and never taken back.
+  //
+  // It is parsed through a detached element's CSSOM, NOT by splitting the
+  // string: the live snapshot enumerates longhands (`margin: 0 auto` reads back
+  // as margin-top/right/bottom/left, `inset: 0` as top/right/bottom/left), so a
+  // string-split `prev` holding the shorthand diffed every longhand as
+  // "changed", pulled margin-left / top / left into the motion run with an
+  // empty pre-run value, and withholding then REMOVED them — a centered element
+  // jumped left, an `inset:0` overlay collapsed to 0x0. (cssText, not
+  // setAttribute: the CSSOM setter is not subject to the page's style-src CSP.)
+  let styleScratch = null;
+  function parseStyleString(str) {
+    if (!str) return snapshotDecl({ length: 0 });
+    try {
+      if (!styleScratch) styleScratch = document.createElement('div');
+      styleScratch.style.cssText = str;
+      const m = snapshotDecl(styleScratch.style);
+      styleScratch.style.cssText = '';
+      return m;
+    } catch (e) { return snapshotDecl({ length: 0 }); }
+  }
+
+  function handleStyleMutation(el, oldValue) {
     if (!enabled || siteAllowed) return;
     const cur = snapshotStyle(el);
-    const prev = styleSnaps.get(el);
+    const prev = styleSnaps.get(el) || (oldValue !== undefined ? parseStyleString(oldValue) : undefined);
     styleSnaps.set(el, cur);
     if (!prev) return;
     const changed = [];
     for (const [p, v] of cur) if (prev.get(p) !== v) changed.push(p);
     for (const p of prev.keys()) if (!cur.has(p)) changed.push(p);
+    const motionRun = motionRuns.get(el);
+    if (motionRun && motionRun.withholding) {
+      // An empty diff is meaningful here: it means the page rewrote exactly
+      // what we were already holding. The run still needs the write.
+      handleMotionMutation(el, cur, prev, changed);
+      return;
+    }
     if (!changed.length) return;
     if (!changed.every((p) => p.startsWith('--'))) {
-      // A real style property moved too — this is ordinary DOM styling, not
-      // the var()-feed pattern. Reset any run in progress.
+      // A real style property moved too — this is not the var()-feed pattern,
+      // so the custom-property pinner does not apply. Reset any run of its in
+      // progress and hand the write to the JS-motion detector below, which is
+      // the path that catches rAF animation libraries.
       styleRuns.delete(el);
+      handleMotionMutation(el, cur, prev, changed);
       return;
     }
 
@@ -1274,7 +1475,414 @@
     }
   }
 
+  // --- JS-driven motion (rAF animation libraries) ---
+  // User report 2026-08-27: claude.com/product/claude-science "begins to have
+  // horrible animations" as you scroll. It is Webflow + GSAP/ScrollTrigger,
+  // and the extension had NO effect on it whatsoever (residual motion after
+  // the wheel stopped: 2041 rendered states with Still, 2096 without).
+  //
+  // GSAP and every library like it animate by writing inline `transform` /
+  // `opacity` / `filter` on the element every animation frame. That makes the
+  // motion invisible to all of the defenses above: `document.getAnimations()`
+  // returns nothing (no CSS animation, no WAAPI), nothing transitions (so
+  // duration-zeroing is moot), and the custom-property pinner right above
+  // deliberately ignores it — it only fires when EVERY changed property is a
+  // `--*` var, and these writes touch real properties.
+  //
+  // Strategy is the one main-world-patch.js already uses for timer-driven
+  // scrollLeft runs: detect a sustained RUN of writes, rewind the frames that
+  // already landed, WITHHOLD the rest so nothing paints, and apply the final
+  // value in one step once the writes stop. The element arrives where the page
+  // intended, having moved once instead of sixty times — a hop, not a glide.
+  // A run that never settles (an infinite loop animation) simply stays frozen.
+  //
+  // Withholding rather than pinning is what makes this safe for reveal
+  // animations: a fade-up tween ends at the element's resting state, so
+  // "apply the final value on settle" reveals the content properly. Pinning
+  // mid-tween would strand it half-transparent and offset.
+
+  const MOTION_RUN_THRESHOLD = 3;   // distinct-frame writes => it's animating
+  const MOTION_FRAME_GAP_MS = 5;    // writes closer than this are one frame (a
+                                    // tooltip positioner's three microtask-
+                                    // separated writes are not an animation)
+  const MOTION_SETTLE_MS = 120;     // quiet period that ends a withheld run
+  const MOTION_SETTLE_MAX_MS = 1000;
+  const MOTION_RUN_RESET_MS = 400;  // silence longer than this starts a new run
+  const USER_SCROLL_MS = 150;       // see selfAnimators below
+  const DRAG_MOVE_MS = 150;         // pointer must have moved this recently
+  const STARVE_FRAMES = 5;          // identical page writes while withheld =>
+                                    // the page is reading our held value back
+
+  // Properties whose repeated rewriting is what the user perceives as motion.
+  // Deliberately not exhaustive over all of CSS: a run has to move, fade,
+  // blur or reshape something to qualify. These are matched against CSSOM
+  // enumeration, which yields LONGHANDS — hence background-position-x/-y (the
+  // shorthand name alone never matched, so JS sprite tickers ran unblocked).
+  const MOTION_PROPS = new Set([
+    'transform', 'translate', 'rotate', 'scale', 'perspective',
+    'transform-origin', 'opacity', 'filter', 'backdrop-filter',
+    'clip-path', 'mask-position', 'background-position',
+    'background-position-x', 'background-position-y', 'background-size',
+    'object-position', 'stroke-dashoffset', 'stroke-dasharray',
+    'left', 'top', 'right', 'bottom', 'width', 'height',
+    'margin-left', 'margin-top', 'margin-right', 'margin-bottom',
+  ]);
+
+  // Cheap pre-filter so the observer can skip the snapshot/diff for style
+  // writes that cannot possibly be motion (display toggles, colour swaps).
+  const MOTION_PROP_RE = /transform|translate|rotate|scale|perspective|opacity|filter|clip-path|mask-position|background-position|background-size|object-position|stroke-dash|left|top|right|bottom|width|height|margin/;
+
+  const motionRuns = new WeakMap();  // el -> run state
+  const selfAnimators = new WeakSet();
+  // Elements whose animation READS ITS OWN INLINE STYLE BACK each step
+  // (`el.style.left = parseFloat(el.style.left) + 10 + 'px'`). Withholding
+  // feeds such a loop our held value forever: it never advances and never
+  // reaches its end condition — a hand-rolled accordion never opens. Function
+  // beats calm, so once detected these are left alone for good.
+  const motionExempt = new WeakSet();
+
+  // A page that repositions elements *in response to* scrolling — a virtualized
+  // list (react-window and friends write `transform: translateY()` on rows as
+  // you scroll), a JS sticky header, a 1:1 parallax layer — writes these same
+  // properties every frame. Withholding those would leave rows stranded and
+  // blanks on screen: the list would look broken, not calm. So while the page
+  // is actually scrolling, writes pass through untouched.
+  //
+  // "Scrolling" is read from `scroll` events, not just the input events that
+  // can cause them. wheel/touchmove alone miss everything that scrolls without
+  // them: iOS momentum after the finger lifts (the longest part of a flick),
+  // Space / PageDown / arrow keys, find-in-page, scrollbar drags. Rows written
+  // during those were counted as self-clocked motion, rewound mid-flick and
+  // then marked self-animators, which froze them on every later scroll too.
+  // A scroll inside an inner scroller only exempts that scroller's contents.
+  //
+  // Decorative animation gives itself away by outliving the scroll: a
+  // ScrollTrigger `scrub` with smoothing keeps drifting for seconds after the
+  // page stops moving, a reveal tween runs on its own timeline, a loop never
+  // stops at all. An element whose run is still going once scrolling has gone
+  // quiet has proved it animates on its own clock, and is added to
+  // `selfAnimators` — from then on it is withheld unconditionally, including
+  // mid-scroll. So the first scroll through a page teaches the extension which
+  // elements to still, and a virtualized list never earns the mark.
+  let lastUserScrollAt = -Infinity;
+  let innerScrolls = [];             // [{ node, at }] recent non-document scrollers
+  function noteScroll(e) {
+    const now = performance.now();
+    const t = e && e.target;
+    if (!t || e.type !== 'scroll' || t === document || t === window ||
+        t === document.documentElement || t === document.body ||
+        t === document.scrollingElement) {
+      lastUserScrollAt = now;
+      return;
+    }
+    for (const s of innerScrolls) if (s.node === t) { s.at = now; return; }
+    if (innerScrolls.length > 8) innerScrolls.shift();
+    innerScrolls.push({ node: t, at: now });
+  }
+  ['wheel', 'touchmove', 'scroll'].forEach((t) => {
+    try {
+      // window-capture runs before any page listener for a document scroll.
+      window.addEventListener(t, noteScroll, { capture: true, passive: true });
+    } catch (e) {}
+  });
+  function isScrollingFor(el, now) {
+    if (now - lastUserScrollAt < USER_SCROLL_MS) return true;
+    if (!innerScrolls.length) return false;
+    innerScrolls = innerScrolls.filter((s) => now - s.at < USER_SCROLL_MS);
+    for (const s of innerScrolls) {
+      try { if (s.node.contains(el)) return true; } catch (e) {}
+    }
+    return false;
+  }
+
+  // A drag writes transform every frame and must stay live, or the page feels
+  // broken under the user's own finger. Only an actual drag counts: primary
+  // button, and the pointer has MOVED in the last DRAG_MOVE_MS — a bare
+  // press-and-hold used to release every withheld loop on the page, and the
+  // latch could stick (a right-click's pointerup goes to the context menu, not
+  // the page), silently disabling withholding until the next full click.
+  let pointerDown = false, pointerDownAt = -Infinity, pointerMovedAt = -Infinity;
+  const pointerReset = () => { pointerDown = false; };
+  try {
+    document.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.isPrimary === false) return;
+      pointerDown = true;
+      pointerDownAt = performance.now();
+      pointerMovedAt = -Infinity;
+    }, { capture: true, passive: true });
+    document.addEventListener('pointermove', () => {
+      if (pointerDown) pointerMovedAt = performance.now();
+    }, { capture: true, passive: true });
+    ['pointerup', 'pointercancel', 'contextmenu', 'dragend'].forEach((t) => {
+      document.addEventListener(t, pointerReset, { capture: true, passive: true });
+    });
+    document.addEventListener('visibilitychange', pointerReset, { capture: true });
+    window.addEventListener('blur', pointerReset, { capture: true });
+  } catch (e) {}
+  function isDragging(now) {
+    return pointerDown && now - pointerMovedAt < DRAG_MOVE_MS;
+  }
+
+  function motionPropsIn(changed) {
+    const out = [];
+    for (const p of changed) if (MOTION_PROPS.has(p)) out.push(p);
+    return out;
+  }
+
+  // Numeric comparison of two CSS values of the same shape
+  // (`translateX(1.8px)` vs `translateX(0px)`): the largest difference between
+  // corresponding numbers, or Infinity when the shapes differ.
+  const NUM_RE = /-?\d*\.?\d+(?:e[-+]?\d+)?/gi;
+  function valueDistance(a, b) {
+    if (a === b) return 0;
+    if (!a || !b || a.replace(NUM_RE, '#') !== b.replace(NUM_RE, '#')) return Infinity;
+    const x = a.match(NUM_RE) || [], y = b.match(NUM_RE) || [];
+    let d = 0;
+    for (let i = 0; i < x.length; i++) d = Math.max(d, Math.abs(Number(x[i]) - Number(y[i])));
+    return d;
+  }
+
+  // Apply the values the run ended on: its destination, in a single step.
+  function landMotionRun(el, run) {
+    motionRuns.delete(el);
+    if (run.timer) { clearTimeout(run.timer); run.timer = null; }
+    if (!run.withholding) return;
+    try {
+      for (const [p, [v, prio]] of run.virtual) {
+        // Return-to-rest (shake, pulse, bounce back to where it started): the
+        // page's LAST write equals the value we are holding, so it changes
+        // nothing, produces no mutation record, and never reaches `virtual` —
+        // which still holds the penultimate frame (translateX(0.1px),
+        // scale(1.01)). If the run ended within about one of its own steps of
+        // the held value, the held value IS the destination (an oscillating
+        // decay approaches rest from both sides, so "converging" is not
+        // required — only closeness relative to the step size).
+        const heldNow = el.style.getPropertyValue(p);
+        const before = run.virtualPrev.get(p);
+        if (heldNow && v && before !== undefined && heldNow !== v) {
+          const step = valueDistance(before, v);
+          const toHeld = valueDistance(v, heldNow);
+          if (step !== Infinity && toHeld <= step * 1.5) continue;
+        }
+        if (v) el.style.setProperty(p, v, prio);
+        else el.style.removeProperty(p);
+      }
+      el.removeAttribute('data-still-motion');
+    } catch (e) {}
+    styleSnaps.set(el, snapshotStyle(el));
+  }
+
+  function armMotionSettle(el, run) {
+    if (run.timer) clearTimeout(run.timer);
+    // A withheld run ends after a quiet period scaled to its own cadence: a
+    // 150ms sprite ticker must not "settle" between two of its ticks, or it is
+    // landed and re-detected forever and every frame still shows. A run that
+    // is only being counted lives for MOTION_RUN_RESET_MS, so a slow stepper
+    // can accumulate frames at all (it used to be torn down at 120ms, which
+    // left MOTION_RUN_RESET_MS dead and anything under ~8fps undetected).
+    const ms = run.withholding
+      ? Math.min(MOTION_SETTLE_MAX_MS, Math.max(MOTION_SETTLE_MS, run.gap * 2.5))
+      : MOTION_RUN_RESET_MS;
+    run.timer = setTimeout(() => { landMotionRun(el, run); }, ms);
+  }
+
+  // Opacity gets a rescue rule, because withholding it naively is the one way
+  // this mechanism could hide content the user came to read: a reveal tween
+  // starts the element at opacity 0, so "hold the pre-run value" would keep it
+  // invisible for as long as the run lasts — forever, for a run that never
+  // settles.
+  //
+  // So: a run that starts already-opaque is held where it was, which freezes a
+  // pulsing glow at full and keeps a fade-out visible until its true final
+  // value lands on settle. A run that starts transparent is one that was on
+  // its way IN, and is held at 1 — the content simply appears, at once,
+  // instead of fading. Either way the settle applies the page's real
+  // destination, so a tween that genuinely ends part-transparent still gets
+  // there.
+  const OPAQUE_ENOUGH = 0.9;
+
+  function heldValueFor(run, prop) {
+    const pre = run.preRun.get(prop);
+    if (prop !== 'opacity') return pre;
+    const n = pre && pre[0] !== '' ? parseFloat(pre[0]) : NaN;
+    if (isNaN(n) || n >= OPAQUE_ENOUGH) return pre;
+    return ['1', ''];
+  }
+
+  function newMotionRun(el, base, moving, now) {
+    const old = motionRuns.get(el);
+    if (old && old.timer) { clearTimeout(old.timer); old.timer = null; }
+    const run = {
+      frames: 0, lastAt: now, lastFrameAt: -Infinity, startedAt: now, gap: 0,
+      withholding: false, timer: null, scrollFed: false,
+      preRun: new Map(), virtual: new Map(), virtualPrev: new Map(),
+      props: new Set(moving), starve: 0, starveKey: null,
+    };
+    setPreRun(run, base);
+    motionRuns.set(el, run);
+    return run;
+  }
+  // `base` is a snapshot of a state that was PAINTED: what we rewind to / hold.
+  function setPreRun(run, base) {
+    run.preRun.clear();
+    for (const p of MOTION_PROPS) {
+      if (base.has(p)) run.preRun.set(p, [base.get(p) || '', prioOf(base, p)]);
+    }
+  }
+
+  function handleMotionMutation(el, cur, prev, changed) {
+    if (motionExempt.has(el)) return false;
+    const moving = motionPropsIn(changed);
+    let run = motionRuns.get(el);
+    const withholding = !!(run && run.withholding);
+    if (!withholding && !moving.length) { motionRuns.delete(el); return false; }
+    const now = performance.now();
+    // The user is dragging. Hand the element straight back, at the position
+    // the page last asked for, or it sticks under their finger. A run that was
+    // already being withheld BEFORE the press is not the thing being dragged —
+    // a selection drag must not un-freeze every loop on the page.
+    if (isDragging(now) && !(withholding && run.startedAt < pointerDownAt)) {
+      if (run) landMotionRun(el, run);
+      motionRuns.delete(el);
+      return false;
+    }
+
+    // Scroll-response writes pass through (see above) unless the element is a
+    // known self-animator. They are PAINTED, so they must neither count toward
+    // the run nor leave the rewind point behind: counting them, with a pre-run
+    // state captured before the scroll began, snapped a scrubbed element back
+    // by the whole scroll distance the moment scrolling stopped, then hopped it
+    // forward again. Keep a fresh, zero-frame run whose rewind point is "now".
+    if (!withholding && !selfAnimators.has(el) && isScrollingFor(el, now)) {
+      if (run) {
+        // Reuse (this path runs per row per frame in a virtualized list).
+        run.frames = 0; run.lastFrameAt = -Infinity; run.lastAt = now;
+        run.startedAt = now; run.gap = 0;
+        run.virtual.clear(); run.virtualPrev.clear();
+        for (const p of moving) run.props.add(p);
+        setPreRun(run, cur);
+      } else {
+        run = newMotionRun(el, cur, moving, now);
+      }
+      run.scrollFed = true;
+      armMotionSettle(el, run);
+      return false;
+    }
+
+    if (!run || now - run.lastAt > MOTION_RUN_RESET_MS) {
+      // First write of a possible run. `prev` is the state before it started —
+      // remember it, because that is what we rewind to if a run develops.
+      run = newMotionRun(el, prev, moving, now);
+    } else if (run.echo) {
+      // Our own reverts come back through the observer like any other write.
+      // Recording those as the destination would land the element exactly
+      // where we were holding it — the animation's first frame — instead of
+      // where the page was taking it. An echo is a write that matches every
+      // value we last wrote, so it is recognised and dropped here.
+      let echo = true;
+      for (const [p, v] of run.echo) {
+        if ((cur.get(p) || '') !== v) { echo = false; break; }
+      }
+      if (echo) { armMotionSettle(el, run); return true; }
+    }
+
+    const newFrame = now - run.lastFrameAt >= MOTION_FRAME_GAP_MS;
+    if (newFrame) {
+      if (run.lastFrameAt !== -Infinity) run.gap = now - run.lastFrameAt;
+      run.lastFrameAt = now;
+      if (!run.withholding) run.frames++;
+    }
+    run.lastAt = now;
+    for (const p of moving) run.props.add(p);
+
+    // Record the destination from the LIVE style, for every property this run
+    // touches — not just the ones that differ from last time. While withholding
+    // we have written our own held values into the element, so a page write
+    // that happens to match one of them produces no diff at all; trusting
+    // `changed` here would leave that property's destination a frame stale and
+    // land the element in a mix of two frames.
+    let key = '';
+    for (const p of run.props) {
+      const v = cur.get(p) || '';
+      const was = run.virtual.get(p);
+      if (newFrame && was && was[0] !== v) run.virtualPrev.set(p, was[0]);
+      run.virtual.set(p, [v, prioOf(cur, p)]);
+      key += p + ':' + v + ';';
+    }
+
+    if (run.withholding && newFrame) {
+      // Starvation: frame after frame the page writes the SAME values, and
+      // they are not the values we hold. A timeline-driven tween never does
+      // that; a loop stepping from its own inline style does, because every
+      // read returns our held value. Give the element back, permanently.
+      let differsFromHeld = false;
+      for (const p of run.props) {
+        const held = heldValueFor(run, p);
+        if ((cur.get(p) || '') !== ((held && held[0]) || '')) { differsFromHeld = true; break; }
+      }
+      if (differsFromHeld && key === run.starveKey) run.starve++;
+      else { run.starve = 0; run.starveKey = key; }
+      if (run.starve >= STARVE_FRAMES) {
+        motionExempt.add(el);
+        selfAnimators.delete(el);
+        landMotionRun(el, run);
+        return false;
+      }
+    }
+
+    if (!run.withholding) {
+      // An element already known to animate on its own clock is withheld from
+      // its very first frame; anything else has to show a sustained run first.
+      const known = selfAnimators.has(el);
+      if (known || run.frames >= MOTION_RUN_THRESHOLD) {
+        // A run that grew out of scroll-response writes holds at the last
+        // state that was painted — rewinding further would move it backwards.
+        if (run.scrollFed && !known) setPreRun(run, prev);
+        run.withholding = true;
+        // Reaching here means the element was animating while the page was
+        // NOT scrolling: it runs on its own clock. Remember that, so the next
+        // scroll through this page withholds it from its very first frame
+        // rather than letting it glide until the scrolling goes quiet again.
+        selfAnimators.add(el);
+        try { el.setAttribute('data-still-motion', 'withheld'); } catch (e) {}
+      } else if (run.scrollFed) {
+        setPreRun(run, cur);  // still counting: this frame paints
+      }
+    }
+
+    if (run.withholding) {
+      // Revert to the pre-run values. The observer runs before paint, so these
+      // writes never reach the screen — the frames simply do not render. Only
+      // motion properties this run itself moved are ever touched.
+      try {
+        for (const p of run.props) {
+          const held = heldValueFor(run, p);
+          if (held && held[0]) el.style.setProperty(p, held[0], held[1]);
+          else el.style.removeProperty(p);
+        }
+      } catch (e) {}
+      const after = snapshotStyle(el);
+      styleSnaps.set(el, after);
+      run.echo = new Map();
+      for (const p of run.props) run.echo.set(p, after.get(p) || '');
+    }
+    armMotionSettle(el, run);
+    return run.withholding;
+  }
+
+  function releaseAllMotion() {
+    try {
+      document.querySelectorAll('[data-still-motion]').forEach((el) => {
+        const run = motionRuns.get(el);
+        if (run) landMotionRun(el, run);
+        el.removeAttribute('data-still-motion');
+        motionRuns.delete(el);
+      });
+    } catch (e) {}
+  }
+
   function unpinAllStyles() {
+    releaseAllMotion();
     try {
       document.querySelectorAll('[data-still-style="pinned"]').forEach((el) => {
         stylePins.delete(el);
@@ -1292,14 +1900,18 @@
       for (const m of mutations) {
         const el = m.target;
         if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.style) continue;
-        // Fast path: neither old nor new value mentions a custom property —
-        // skip the snapshot/diff entirely (this is the per-frame transform-
-        // writer case: GSAP, parallax libs, drag handlers).
+        // Fast path: skip the snapshot/diff for writes that can be neither
+        // the var()-feed pattern nor motion (display toggles, colour swaps).
+        // Per-frame transform writers — GSAP, parallax libs, drag handlers —
+        // used to be skipped here; they are the JS-motion case and now go
+        // through.
         const oldV = m.oldValue || '';
         let newV = '';
         try { newV = el.getAttribute('style') || ''; } catch (e) {}
-        if (oldV.indexOf('--') === -1 && newV.indexOf('--') === -1) continue;
-        handleStyleMutation(el);
+        if (oldV === newV) continue;
+        const hasVar = oldV.indexOf('--') !== -1 || newV.indexOf('--') !== -1;
+        if (!hasVar && !MOTION_PROP_RE.test(oldV) && !MOTION_PROP_RE.test(newV)) continue;
+        handleStyleMutation(el, oldV);
       }
     });
     observer.observe(document.documentElement, {
@@ -1354,12 +1966,21 @@
           // state on any foreign write: the isolated world has equal DOM
           // authority, so the page cannot win this exchange.
           if (target === document.documentElement &&
-              mutation.attributeName === 'data-still-off') {
+              (mutation.attributeName === 'data-still-off' ||
+               mutation.attributeName === 'data-still-on')) {
             const wantOff = !enabled || siteAllowed;
             if (wantOff !== target.hasAttribute('data-still-off')) {
               try {
                 if (wantOff) target.setAttribute('data-still-off', '');
                 else target.removeAttribute('data-still-off');
+              } catch (e) {}
+            }
+            // data-still-on is the main-world play() refusal's readiness
+            // signal; a page clearing it would switch video protection off.
+            if (wantOff === target.hasAttribute('data-still-on')) {
+              try {
+                if (wantOff) target.removeAttribute('data-still-on');
+                else target.setAttribute('data-still-on', '');
               } catch (e) {}
             }
             continue;
@@ -1424,7 +2045,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off']
+      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off', 'data-still-on']
     });
 
   }
@@ -1464,15 +2085,59 @@
         neutralizeAnimation(a);
       }
     } catch (e) {}
+    for (const root of liveCoveredRoots()) cancelAnimationsIn(root);
   }
 
+
+  // Chained-animation guard. A page that sequences finite animations through
+  // their finished promises (or restarts a CSS animation on animationend)
+  // spins forever once each one finishes instantly: finish → promise resolves
+  // in a microtask → next animate() → finish → … with no frame in between,
+  // and the main thread never yields (measured: page.evaluate hung). After a
+  // burst of neutralizations on the same element, cancel() instead — the
+  // finished promise rejects, no animationend fires, and the chain stops with
+  // the element in its resting style. (StopTheMadness's "Protect animation
+  // end" exists for the same reason.)
+  // Two tiers, both counting only GENUINE new starts (neutralizeAnimation
+  // returns early for an already-finished animation, so the repeated timed /
+  // mutation-driven passes over the same snapped animation never count — they
+  // used to, and a plain `opacity:0; animation: fadeIn 1s forwards` hero got
+  // cancel()ed back to invisible after five passes inside a second):
+  //  - same task: a finished-promise chain spins in microtasks, so more than
+  //    BURST_TASK_N starts on one element before a macrotask runs is a spin;
+  //  - per second: an animationend-restart loop yields a frame each lap, so it
+  //    needs a time window — set well above legitimate rapid UI (a progress
+  //    bar animating on every progress event runs ~10/s).
+  const BURST_TASK_N = 8, BURST_N = 20, BURST_MS = 1000;
+  const bursts = new WeakMap(); // target el -> { n, t0, taskN, epoch }
+  let burstEpoch = 0, burstEpochArmed = false;
+  function inBurst(a) {
+    try {
+      const el = a.effect && a.effect.target;
+      if (!el) return false;
+      if (!burstEpochArmed) {
+        burstEpochArmed = true;
+        setTimeout(() => { burstEpoch++; burstEpochArmed = false; }, 0);
+      }
+      const t = performance.now();
+      let b = bursts.get(el);
+      if (!b || t - b.t0 > BURST_MS) { b = { n: 0, t0: t, taskN: 0, epoch: burstEpoch }; bursts.set(el, b); }
+      if (b.epoch !== burstEpoch) { b.epoch = burstEpoch; b.taskN = 0; }
+      b.n++; b.taskN++;
+      return b.taskN > BURST_TASK_N || b.n > BURST_N;
+    } catch (e) { return false; }
+  }
   function neutralizeAnimation(a) {
     try {
+      // Already snapped to its end (by us, or naturally): nothing to do, and it
+      // must not feed the burst counter — fill:forwards keeps a finished
+      // animation in getAnimations(), so every later pass sees it again.
+      if (a.playState === 'finished') return;
       const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
         ? a.effect.getComputedTiming()
         : null;
       const iterations = timing && timing.iterations;
-      if (iterations === Infinity) {
+      if (iterations === Infinity || inBurst(a)) {
         a.cancel();
       } else if (a.effect && typeof a.effect.updateTiming === 'function') {
         // Force fill to forwards so the end state persists post-finish,
@@ -1547,7 +2212,15 @@
       scanAll, scanBackgroundImages, killSVGAnimations, flaggedAnimatedURLs,
       cancelAnimations, neutralizeAnimation, handleStyleMutation, unpinAllStyles,
       isStylePinned: (el) => stylePins.has(el),
+      isMotionWithheld: (el) => {
+        const r = motionRuns.get(el);
+        return !!(r && r.withholding);
+      },
+      isSelfAnimator: (el) => selfAnimators.has(el),
+      isMotionExempt: (el) => motionExempt.has(el),
+      releaseAllMotion,
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
+      coverShadowRoot, shadowRootCovered, liveCoveredRoots,
       isAnimatedAVIFBuffer, isAnimatedWebPBuffer, isAnimatedPNGBuffer,
       checkOpenProbe, matchesHide, probeCache,
     };
