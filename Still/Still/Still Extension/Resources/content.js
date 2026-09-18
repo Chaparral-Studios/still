@@ -1671,6 +1671,29 @@
       window.addEventListener(t, noteScroll, { capture: true, passive: true });
     } catch (e) {}
   });
+  // What still passes through while the page scrolls is PLACEMENT, not motion.
+  // A virtualized list repositions its rows (or the wrapper around them) with
+  // these same style writes, but always together with content being swapped
+  // in and out: rows mount and unmount, or a recycled row gets new cells.
+  // Withholding that leaves the new content at the old offset — rows strand
+  // and jump, i.e. Still would CREATE motion. Scroll-linked decoration
+  // (parallax, reveal-on-scroll scrubs, JS sticky headers, fade/scale tied to
+  // scroll position) rewrites style on an element whose content is not
+  // changing at all, and that is withheld like any other animation: it holds
+  // while the page scrolls and lands once when the scrolling stops.
+  // The signature is DOM churn at or inside the element, stamped by the style
+  // observer from the childList / characterData records of the same batches.
+  const PLACEMENT_CHURN_MS = 250;
+  const CHURN_ANCESTORS = 6;
+  const domChurnAt = new WeakMap();
+  function stampChurn(node, now) {
+    for (let i = 0, n = node; n && i <= CHURN_ANCESTORS; i++, n = n.parentNode) domChurnAt.set(n, now);
+  }
+  function isPlacementWrite(el, now) {
+    const t = domChurnAt.get(el);
+    return t !== undefined && now - t < PLACEMENT_CHURN_MS;
+  }
+
   function isScrollingFor(el, now) {
     if (now - lastUserScrollAt < USER_SCROLL_MS) return true;
     if (!innerScrolls.length) return false;
@@ -1771,6 +1794,7 @@
   function landProvisional(el, run) {
     run.timer = null;
     if (motionRuns.get(el) !== run || !run.provisional) return;
+    if (isScrollingFor(el, performance.now())) { armMotionSettle(el, run); return; } // still scrolling: keep holding
     try {
       for (const [p, [v, prio]] of run.virtual) {
         if (v) el.style.setProperty(p, v, prio);
@@ -1797,7 +1821,12 @@
     // can accumulate frames at all (it used to be torn down at 120ms, which
     // left MOTION_RUN_RESET_MS dead and anything under ~8fps undetected).
     if (run.provisional) {
-      run.timer = setTimeout(() => { landProvisional(el, run); }, MOTION_PROVISIONAL_MS);
+      // While the page is scrolling the window stays open until the scrolling
+      // stops: scroll-linked decoration often writes once per scroll EVENT
+      // (a wheel notch every ~60ms), which would otherwise land between
+      // writes and show every step.
+      const ms = isScrollingFor(el, performance.now()) ? USER_SCROLL_MS + 20 : MOTION_PROVISIONAL_MS;
+      run.timer = setTimeout(() => { landProvisional(el, run); }, ms);
       return;
     }
     const ms = (run.withholding || run.cssHold)
@@ -1911,13 +1940,13 @@
       motionRuns.delete(el);
     }
 
-    // Scroll-response writes pass through (see above) unless the element is a
-    // known self-animator. They are PAINTED, so they must neither count toward
+    // Placement writes made while scrolling pass through (see isPlacementWrite)
+    // unless the element is a known self-animator. They are PAINTED, so they must neither count toward
     // the run nor leave the rewind point behind: counting them, with a pre-run
     // state captured before the scroll began, snapped a scrubbed element back
     // by the whole scroll distance the moment scrolling stopped, then hopped it
     // forward again. Keep a fresh, zero-frame run whose rewind point is "now".
-    if (!withholding && !selfAnimators.has(el) && isScrollingFor(el, now)) {
+    if (!withholding && !selfAnimators.has(el) && isScrollingFor(el, now) && isPlacementWrite(el, now)) {
       if (run) {
         // Reuse (this path runs per row per frame in a virtualized list).
         run.frames = 0; run.lastFrameAt = -Infinity; run.lastAt = now;
@@ -2078,7 +2107,16 @@
     // so this path is built to early-out cheaply — the shared observer's
     // attribute handler does tag-specific work we'd have to skip around.
     const observer = new MutationObserver((mutations) => {
+      // Stamp DOM churn first, so a style write in the same batch as the
+      // content swap that goes with it is recognised as placement.
+      let now = 0;
       for (const m of mutations) {
+        if (m.type === 'attributes') continue;
+        if (!now) now = performance.now();
+        stampChurn(m.target, now);
+      }
+      for (const m of mutations) {
+        if (m.type !== 'attributes') continue;
         const el = m.target;
         if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.style) continue;
         // Fast path: skip the snapshot/diff for writes that can be neither
@@ -2100,6 +2138,8 @@
       attributes: true,
       attributeFilter: ['style'],
       attributeOldValue: true,
+      childList: true,        // churn stamps only (see isPlacementWrite)
+      characterData: true,
     });
   }
 
