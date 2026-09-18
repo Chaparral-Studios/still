@@ -129,18 +129,22 @@ test.describe('shadow-root and late-WAAPI animation coverage', () => {
   test('element.animate() created late is neutralized at creation: finite snaps to end, infinite is cancelled', async ({ page }) => {
     await setup(page);
     await page.waitForTimeout(700);
-    const r = await page.evaluate(() => {
+    const r = await page.evaluate(async () => {
       const fin = document.getElementById('w-light').animate(
         [{ transform: 'translateX(0)' }, { transform: 'translateX(300px)' }], { duration: 5000 });
       const inf = window.__open.getElementById('w').animate(
         [{ transform: 'translateX(0)' }, { transform: 'translateX(300px)' }], { duration: 2000, iterations: Infinity });
+      await Promise.resolve(); // neutralized one microtask after creation (so onfinish handlers attach first)
       return {
         finState: fin.playState, finTf: getComputedStyle(document.getElementById('w-light')).transform,
         infState: inf.playState,
       };
     });
     expect(r.finState).toBe('finished');
-    expect(r.finTf).toBe('matrix(1, 0, 0, 1, 300, 0)'); // end state, immediately, fill upgraded to forwards
+    // Finished instantly. A script-created animation keeps its author's fill
+    // (none here), so the element rests in its base style — exactly where the
+    // unblocked browser ends up once the animation is over.
+    expect(r.finTf).toBe('none');
     expect(r.infState).toBe('idle');
     expect(await moving(page, 'open', 'w')).toBe(false);
   });
@@ -159,7 +163,7 @@ test.describe('shadow-root and late-WAAPI animation coverage', () => {
       return { afterPlay, afterReverse };
     });
     expect(r.afterPlay.state).toBe('finished');
-    expect(r.afterPlay.tf).toBe('matrix(1, 0, 0, 1, 300, 0)');
+    expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(r.afterPlay.tf); // author fill is none: base style
     expect(r.afterReverse.state).toBe('finished');
     // A reversed animation's end is its start: finished at time 0 sits in the
     // before-phase, where fill:forwards doesn't apply, so the element simply
@@ -232,6 +236,72 @@ test.describe('shadow-root and late-WAAPI animation coverage', () => {
       return getComputedStyle(bar).width;
     });
     expect(width).toBe('400px');
+  });
+
+  test('scripted animations keep their author fill: forwards persists, none never outranks later style writes (stuck-toast regression)', async ({ page }) => {
+    await setup(page);
+    await page.waitForTimeout(300);
+    const r = await page.evaluate(async () => {
+      const toast = document.createElement('div'); toast.textContent = 'toast'; toast.style.opacity = '1'; document.body.appendChild(toast);
+      const a = toast.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 300 });
+      let finished = false; a.onfinish = () => { finished = true; toast.hidden = true; };
+      await new Promise((res) => setTimeout(res, 150));
+      toast.hidden = false; toast.style.opacity = '1';
+      const fwd = document.createElement('div'); document.body.appendChild(fwd);
+      fwd.animate([{ opacity: 1 }, { opacity: 0.25 }], { duration: 300, fill: 'forwards' });
+      await Promise.resolve(); // neutralization lands one microtask after creation
+      return { finished, toastOpacity: getComputedStyle(toast).opacity, fwdOpacity: getComputedStyle(fwd).opacity };
+    });
+    expect(r.finished).toBe(true);         // the page's own onfinish still ran
+    expect(r.toastOpacity).toBe('1');      // re-shown toast is visible again
+    expect(r.fwdOpacity).toBe('0.25');     // author-chosen forwards fill persists
+  });
+
+  test('a forged data-still-off blip does not strip shadow coverage for good', async ({ page }) => {
+    await setup(page);
+    await page.evaluate(async () => {
+      document.documentElement.setAttribute('data-still-off', ''); // content.js reverts this
+      await new Promise((res) => setTimeout(res, 200));
+      window.__go();
+    });
+    await page.waitForTimeout(120);
+    expect(await page.evaluate(() => document.documentElement.hasAttribute('data-still-off'))).toBe(false);
+    expect(await tf(page, 'open', 't')).toBe(FINAL);
+    expect(await tf(page, 'closed', 't')).toBe(FINAL);
+  });
+
+  test('shadow sheet carries the specificity armor: a component `!important` transition still snaps', async ({ page }) => {
+    await setup(page);
+    const t = await page.evaluate(async () => {
+      const host = document.createElement('div'); document.body.appendChild(host);
+      const root = host.attachShadow({ mode: 'closed' });
+      root.innerHTML = '<style>#armored{width:40px;height:40px;transition:transform 2s linear !important}#armored.go{transform:translateY(300px)}</style><div id="armored"></div>';
+      const el = root.getElementById('armored');
+      await new Promise((res) => setTimeout(res, 50));
+      el.classList.add('go');
+      await new Promise((res) => setTimeout(res, 120));
+      return getComputedStyle(el).transform;
+    });
+    expect(t).toBe(FINAL);
+  });
+
+  test('a nested declarative root that arrives after its parent was covered gets covered on a later scan', async ({ page }) => {
+    await setup(page);
+    const supported = await page.evaluate(() => typeof Element.prototype.setHTMLUnsafe === 'function');
+    test.skip(!supported, 'setHTMLUnsafe not available');
+    await page.evaluate(() => {
+      window.__decl.getElementById('decl').setHTMLUnsafe(
+        '<div id="nest-host"><template shadowrootmode="open"><style>#n{width:20px;height:20px;transition:transform 2s linear}#n.go{transform:translateY(300px)}</style><div id="n"></div></template></div>');
+      document.body.appendChild(document.createElement('i')); // document-level mutation → scan
+    });
+    await page.waitForTimeout(1400); // past the throttled shadow walk
+    const t = await page.evaluate(async () => {
+      const n = window.__decl.getElementById('nest-host').shadowRoot.getElementById('n');
+      n.classList.add('go');
+      await new Promise((res) => setTimeout(res, 120));
+      return getComputedStyle(n).transform;
+    });
+    expect(t).toBe(FINAL);
   });
 
   test('a component that reassigns adoptedStyleSheets after attach (Lit pattern) stays covered', async ({ page }) => {

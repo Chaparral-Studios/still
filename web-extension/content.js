@@ -194,6 +194,10 @@
       return !!root.querySelector(':scope > style[data-still-shadow]');
     } catch (e) { return false; }
   }
+  // Listener installation is tracked separately from sheet coverage: an
+  // off→on toggle un-covers and re-covers every root, and a second listener
+  // per root would double-feed the burst guard.
+  const shadowListenerRoots = new WeakSet();
   function coverShadowRoot(root) {
     if (!root) return;
     if (root.__stillCovered) {
@@ -202,18 +206,25 @@
       if (shadowSheet && !shadowRootCovered(root)) {
         try { root.adoptedStyleSheets = [...root.adoptedStyleSheets, shadowSheet]; } catch (e) {}
       }
+      // A nested declarative root can arrive after its parent was first
+      // covered (streamed SSR fragments, setHTMLUnsafe); document-level
+      // querySelectorAll never descends here, so walk it on rescans too.
+      coverOpenShadowRoots(root);
       return;
     }
     root.__stillCovered = true;
     if (typeof WeakRef === 'function') coveredRoots.push(new WeakRef(root));
-    try {
-      root.addEventListener('animationstart', (e) => {
-        if (!enabled || siteAllowed) return;
-        const t = e.target;
-        if (!t || typeof t.getAnimations !== 'function') return;
-        try { for (const a of t.getAnimations()) neutralizeAnimation(a); } catch (err) {}
-      }, { capture: true, passive: true });
-    } catch (e) {}
+    if (!shadowListenerRoots.has(root)) {
+      shadowListenerRoots.add(root);
+      try {
+        root.addEventListener('animationstart', (e) => {
+          if (!enabled || siteAllowed) return;
+          const t = e.target;
+          if (!t || typeof t.getAnimations !== 'function') return;
+          try { for (const a of t.getAnimations()) neutralizeAnimation(a); } catch (err) {}
+        }, { capture: true, passive: true });
+      } catch (e) {}
+    }
     if (!shadowRootCovered(root)) {
       try {
         if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
@@ -236,6 +247,26 @@
       const nodes = scope.querySelectorAll('*');
       for (const el of nodes) if (el.shadowRoot) coverShadowRoot(el.shadowRoot);
     } catch (e) {}
+  }
+  // scanAll runs on every mutation batch; a whole-document walk each time is
+  // the cost scanBackgroundImages already learned to avoid. Imperative roots
+  // are covered by the main world at attachShadow(), so this walk only has to
+  // find declarative roots (and stand in when a CSP drops the main world) —
+  // at most once a second, with a trailing walk so nothing is missed.
+  const SHADOW_WALK_MS = 1000;
+  let lastShadowWalk = -Infinity, shadowWalkTimer = null;
+  function scheduleShadowWalk() {
+    const now = performance.now();
+    if (now - lastShadowWalk >= SHADOW_WALK_MS) {
+      lastShadowWalk = now;
+      coverOpenShadowRoots(document);
+    } else if (!shadowWalkTimer) {
+      shadowWalkTimer = setTimeout(() => {
+        shadowWalkTimer = null;
+        lastShadowWalk = performance.now();
+        coverOpenShadowRoots(document);
+      }, SHADOW_WALK_MS - (now - lastShadowWalk));
+    }
   }
   function liveCoveredRoots() {
     const out = [];
@@ -1283,7 +1314,7 @@
   }
 
   function scanAll() {
-    coverOpenShadowRoots(document);
+    scheduleShadowWalk();
     document.querySelectorAll('img').forEach(processImage);
     scanBackgroundImages();
     killSVGAnimations();

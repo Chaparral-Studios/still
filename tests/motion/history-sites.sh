@@ -7,6 +7,12 @@
 #                                             # iPhone history; needs Full Disk Access)
 #   ./tests/motion/history-sites.sh all
 set -euo pipefail
+
+# A private temp copy of the history database, removed on ANY exit — a fixed
+# world-readable /tmp path left a full browser history behind whenever one
+# source failed under `set -e`.
+TMPDB="$(mktemp -t history-sites)"
+trap 'rm -f "$TMPDB"' EXIT
 SRC="${1:-all}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 LIMIT="${LIMIT:-200}"
@@ -24,8 +30,8 @@ do_chrome () {
   : > "$out"
   for f in ~/Library/Application\ Support/Google/Chrome/*/History; do
     [ -f "$f" ] || continue
-    cp "$f" /tmp/history-sites.db
-    sqlite3 /tmp/history-sites.db "$(host_sql urls)" 2>/dev/null || true
+    cp "$f" "$TMPDB"
+    sqlite3 "$TMPDB" "$(host_sql urls)" 2>/dev/null || true
     n=$((n+1))
   done | merge > "$out"
   echo "chrome: $(wc -l < "$out" | tr -d ' ') domains -> $out"
@@ -33,11 +39,11 @@ do_chrome () {
 
 do_safari () {
   local out="$DIR/sites-safari.txt" db=~/Library/Safari/History.db
-  if ! cp "$db" /tmp/history-sites.db 2>/dev/null; then
+  if ! cp "$db" "$TMPDB" 2>/dev/null; then
     echo "safari: cannot read $db — grant Full Disk Access to your terminal app, and make sure Safari iCloud sync is on (iPhone + Mac)" >&2
     return 1
   fi
-  sqlite3 /tmp/history-sites.db "$(host_sql history_items)" | merge > "$out"
+  sqlite3 "$TMPDB" "$(host_sql history_items)" | merge > "$out"
   echo "safari: $(wc -l < "$out" | tr -d ' ') domains -> $out"
 }
 
@@ -46,13 +52,13 @@ do_safari () {
 # Safari history never syncs. Domains only, weighted by seconds of use.
 do_screentime () {
   local out="$DIR/sites-screentime.txt" db=~/Library/Application\ Support/Knowledge/knowledgeC.db
-  if ! cp "$db" /tmp/history-sites.db 2>/dev/null; then
+  if ! cp "$db" "$TMPDB" 2>/dev/null; then
     echo "screentime: cannot read $db — grant Full Disk Access to your terminal app" >&2
     return 1
   fi
-  sqlite3 /tmp/history-sites.db "select case when ZVALUESTRING like 'www.%' then substr(ZVALUESTRING,5) else ZVALUESTRING end, cast(sum(ZENDDATE-ZSTARTDATE) as integer) from ZOBJECT where ZSTREAMNAME='/app/webUsage' and ZVALUESTRING is not null group by 1;" | merge > "$out"
+  sqlite3 "$TMPDB" "select case when ZVALUESTRING like 'www.%' then substr(ZVALUESTRING,5) else ZVALUESTRING end, cast(sum(ZENDDATE-ZSTARTDATE) as integer) from ZOBJECT where ZSTREAMNAME='/app/webUsage' and ZVALUESTRING is not null group by 1;" | merge > "$out"
   local devices
-  devices=$(sqlite3 /tmp/history-sites.db "select count(distinct ZSOURCE) from ZOBJECT where ZSTREAMNAME='/app/webUsage';" 2>/dev/null || echo '?')
+  devices=$(sqlite3 "$TMPDB" "select count(distinct ZSOURCE) from ZOBJECT where ZSTREAMNAME='/app/webUsage';" 2>/dev/null || echo '?')
   echo "screentime: $(wc -l < "$out" | tr -d ' ') domains from $devices source(s) -> $out  (more than 1 source = phone data is included)"
 }
 
@@ -63,4 +69,3 @@ case "$SRC" in
   all) do_chrome; do_safari || true; do_screentime || true ;;
   *) echo "usage: $0 chrome|safari|screentime|all" >&2; exit 2 ;;
 esac
-rm -f /tmp/history-sites.db

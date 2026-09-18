@@ -446,7 +446,10 @@
     // gesture recorded" shouldn't happen — fail closed if it somehow does;
     // content.js's own gesture tracker is the second chance.
     if (mwPointerAt === -Infinity && mwKeyAt === -Infinity) return false;
-    if (mwKeyAt >= mwPointerAt) return true;
+    // Same rule as content.js gestureAuthorizesPlay: a recent key authorizes
+    // regardless of a later click elsewhere — a refused play() can't be undone,
+    // so this world must never be the stricter of the two.
+    if (mwKeyAt >= mwPointerAt || performance.now() - mwKeyAt < 2000) return true;
     var r = null;
     try { r = v.getBoundingClientRect(); } catch (e) {}
     if (r && r.width > 0 && r.height > 0) {
@@ -591,10 +594,20 @@
   const SHADOW_CSS_FALLBACK = [
     '#-still-shadow-marker { --still: 1; }',
     '*, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }',
+    // Specificity armor, same as content.js: a component sheet declaring
+    // `transition: … !important` on an id/class selector beats the bare `*`.
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-),' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::before,' +
+    ':not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-):not(#-still-)::after' +
+    ' { transition-duration: 0s !important; scroll-behavior: auto !important; }',
     'svg [data-still-svg-settling] { visibility: hidden !important; }',
     'video[data-still-video="blocked"] { display: none !important; }'
   ].join('\n');
   let mwShadowSheet = null;
+  let mwSheetFromTemplate = false; // fallback text is replaced once the template exists
+  const mwKnownRoots = [];   // WeakRefs to every root ever attached — never cleared, so a
+                             // data-still-off blip can be followed by a re-cover
+  const mwListenerRoots = new WeakSet();
   const mwCoveredRoots = []; // WeakRefs (no strong element Set — SPA-leak lesson)
   const mwCoveredSet = new WeakSet(); // roots we adopted the sheet into
   function mwShadowCss() {
@@ -657,7 +670,16 @@
       if ((timing && timing.iterations === Infinity) || mwInBurst(a)) {
         a.cancel();
       } else if (a.effect && typeof a.effect.updateTiming === 'function') {
-        try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {}
+        // The fill upgrade is for CSS animations/transitions only. A
+        // script-created animation keeps the fill its author chose: a filled
+        // animation outranks every later inline-style and class write, so an
+        // upgraded fade-out left a toast at opacity 0 forever after the page
+        // re-showed it with `style.opacity = 1`. Without the upgrade finish()
+        // lands exactly where the unblocked browser ends up — the base style,
+        // plus whatever the page's own onfinish handler sets.
+        const cssDriven = (typeof CSSAnimation === 'function' && a instanceof CSSAnimation) ||
+          (typeof CSSTransition === 'function' && a instanceof CSSTransition);
+        if (cssDriven) { try { a.effect.updateTiming({ fill: 'forwards' }); } catch (e) {} }
         a.finish();
       } else {
         a.cancel();
@@ -666,20 +688,44 @@
       try { a.cancel(); } catch (e2) {}
     }
   }
-  function mwCoverShadowRoot(root) {
-    if (stillOff()) return;
+  function mwRefreshSheetText() {
+    // The sheet may have been built from the fallback (first attachShadow ran
+    // before content.js published its template). One shared sheet serves every
+    // root, so swapping its text once upgrades them all.
+    if (!mwShadowSheet || mwSheetFromTemplate) return;
     try {
-      root.addEventListener('animationstart', function (e) {
-        if (stillOff()) return;
-        const t = e.target;
-        if (!t || typeof t.getAnimations !== 'function') return;
-        try { t.getAnimations().forEach(mwNeutralizeAnimation); } catch (err) {}
-      }, true);
+      const t = document.getElementById('__still-shadow-css');
+      if (t && t.textContent) { mwShadowSheet.replaceSync(t.textContent); mwSheetFromTemplate = true; }
     } catch (e) {}
+  }
+  function mwCoverShadowRoot(root) {
+    if (!mwListenerRoots.has(root)) {
+      mwListenerRoots.add(root);
+      if (typeof WeakRef === 'function') mwKnownRoots.push(new WeakRef(root));
+      try {
+        root.addEventListener('animationstart', function (e) {
+          // finish()/cancel() can't be undone, so wait for content.js's
+          // "state resolved, protection active" signal like the animate() wrap
+          // does — an allowlisted site must never lose an animation to the
+          // startup race. Anything that started before the signal is swept
+          // once when it appears (mwSweepKnownRoots).
+          if (!stillOn()) return;
+          const t = e.target;
+          if (!t || typeof t.getAnimations !== 'function') return;
+          try { t.getAnimations().forEach(mwNeutralizeAnimation); } catch (err) {}
+        }, true);
+      } catch (e) {}
+    }
+    if (stillOff()) return;
+    mwRefreshSheetText();
     if (mwRootCovered(root)) return;
     try {
       if ('adoptedStyleSheets' in root && typeof CSSStyleSheet === 'function') {
-        if (!mwShadowSheet) { mwShadowSheet = new CSSStyleSheet(); mwShadowSheet.replaceSync(mwShadowCss()); }
+        if (!mwShadowSheet) {
+          const css = mwShadowCss();
+          mwShadowSheet = new CSSStyleSheet(); mwShadowSheet.replaceSync(css);
+          mwSheetFromTemplate = css !== SHADOW_CSS_FALLBACK;
+        }
         root.adoptedStyleSheets = [...root.adoptedStyleSheets, mwShadowSheet];
         mwCoveredSet.add(root);
       } else {
@@ -730,10 +776,24 @@
     }
     mwCoveredRoots.length = 0;
   }
+  // Re-cover after data-still-off goes away again (content.js reverts a page's
+  // forged write within a task; a user can also toggle off→on), and sweep
+  // animations that began before protection was confirmed — closed roots are
+  // reachable from nowhere else.
+  function mwSweepKnownRoots() {
+    if (!stillOn()) return;
+    mwRefreshSheetText();
+    for (const ref of mwKnownRoots) {
+      const root = ref.deref();
+      if (!root) continue;
+      mwCoverShadowRoot(root);
+      try { if (typeof root.getAnimations === 'function') root.getAnimations().forEach(mwNeutralizeAnimation); } catch (e) {}
+    }
+  }
   function installShadowOffObserver() {
     try {
-      new MutationObserver(function () { if (stillOff()) mwUncoverShadowRoots(); })
-        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off'] });
+      new MutationObserver(function () { if (stillOff()) mwUncoverShadowRoots(); else mwSweepKnownRoots(); })
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-still-off', 'data-still-on'] });
       return true;
     } catch (e) { return false; }
   }
@@ -762,9 +822,24 @@
   // can't be undone the way an early canvas freeze can.
   const origElementAnimate = Element.prototype.animate;
   if (typeof origElementAnimate === 'function') {
+    // Deferred by one microtask, not done inline: Chrome only queues the
+    // `finish` event if a listener exists at the moment finish() runs, and
+    // `el.animate(...).onfinish = () => el.remove()` attaches its handler
+    // AFTER animate() returns — finishing inline silently dropped every such
+    // callback (toasts and modals that never get removed). A microtask runs
+    // after the caller's synchronous code and still before any frame paints.
+    const mwQueueMicrotask = typeof queueMicrotask === 'function'
+      ? queueMicrotask.bind(window)
+      : function (f) { Promise.resolve().then(f); };
     Element.prototype.animate = function () {
       const anim = origElementAnimate.apply(this, arguments);
-      try { if (anim && stillOn()) mwNeutralizeAnimation(anim); } catch (e) {}
+      try {
+        if (anim && stillOn()) {
+          mwQueueMicrotask(function () {
+            try { if (stillOn()) mwNeutralizeAnimation(anim); } catch (e) {}
+          });
+        }
+      } catch (e) {}
       return anim;
     };
   }
