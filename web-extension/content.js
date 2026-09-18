@@ -220,6 +220,15 @@
         if (!enabled || siteAllowed) document.documentElement.setAttribute('data-still-off', '');
         else document.documentElement.removeAttribute('data-still-off');
       } catch (e) {}
+      // data-still-on: "state resolved and protection active". The main-world
+      // play() refusal waits for this rather than treating a missing
+      // data-still-off as on — a rejected play() can't be undone the way an
+      // early canvas freeze can, so an allowlisted site must never see one
+      // in the ms before storage answers.
+      try {
+        if (enabled && !siteAllowed) document.documentElement.setAttribute('data-still-on', '');
+        else document.documentElement.removeAttribute('data-still-on');
+      } catch (e) {}
 
       if (!enabled || siteAllowed) {
         style.remove();
@@ -1354,12 +1363,21 @@
           // state on any foreign write: the isolated world has equal DOM
           // authority, so the page cannot win this exchange.
           if (target === document.documentElement &&
-              mutation.attributeName === 'data-still-off') {
+              (mutation.attributeName === 'data-still-off' ||
+               mutation.attributeName === 'data-still-on')) {
             const wantOff = !enabled || siteAllowed;
             if (wantOff !== target.hasAttribute('data-still-off')) {
               try {
                 if (wantOff) target.setAttribute('data-still-off', '');
                 else target.removeAttribute('data-still-off');
+              } catch (e) {}
+            }
+            // data-still-on is the main-world play() refusal's readiness
+            // signal; a page clearing it would switch video protection off.
+            if (wantOff === target.hasAttribute('data-still-on')) {
+              try {
+                if (wantOff) target.removeAttribute('data-still-on');
+                else target.setAttribute('data-still-on', '');
               } catch (e) {}
             }
             continue;
@@ -1424,7 +1442,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off']
+      attributeFilter: ['src', 'srcset', 'data-still-canvas', 'data-still-off', 'data-still-on']
     });
 
   }

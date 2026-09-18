@@ -43,6 +43,17 @@
       return !!(de && de.hasAttribute('data-still-off'));
     } catch (e) { return false; }
   }
+  // `data-still-on` is content.js's "state resolved, protection active" signal
+  // (set once storage answers enabled && !allowlisted; defended against page
+  // writes like data-still-off). Playback refusal below waits for it: the
+  // canvas/SVG paths can undo an early false positive, a rejected play()
+  // promise cannot, so an allowlisted site must never see one.
+  function stillOn() {
+    try {
+      const de = document.documentElement;
+      return !!(de && de.hasAttribute('data-still-on') && !de.hasAttribute('data-still-off'));
+    } catch (e) { return false; }
+  }
 
   // --- Smooth-scroll neutering ---
   // A programmatic smooth scroll is animation: the page glides to a new
@@ -400,6 +411,7 @@
   var MW_CLICK_PAD_PX = 40;
   try {
     document.addEventListener('pointerdown', function (e) {
+      if (e.isTrusted === false) return;
       mwPointerAt = performance.now();
       mwPointerX = e.clientX + window.scrollX; mwPointerY = e.clientY + window.scrollY;
       mwPointerHref = location.href;
@@ -407,6 +419,7 @@
   } catch (e) {}
   try {
     document.addEventListener('touchstart', function (e) {
+      if (e.isTrusted === false) return;
       mwPointerAt = performance.now();
       var t = e.touches && e.touches[0];
       if (t) { mwPointerX = t.clientX + window.scrollX; mwPointerY = t.clientY + window.scrollY; }
@@ -415,6 +428,7 @@
   } catch (e) {}
   try {
     document.addEventListener('keydown', function (e) {
+      if (e.isTrusted === false) return;
       if (e.key !== 'Escape') mwKeyAt = performance.now();
     }, { capture: true, passive: true });
   } catch (e) {}
@@ -473,15 +487,104 @@
     // a real gesture — so script-driven autoplay retries don't qualify. It is
     // page-global, though, so additionally require the gesture to be scoped to
     // this video (see mwGestureAuthorizes above).
+    let gestured = false;
     try {
-      if (typeof navigator !== 'undefined' && navigator.userActivation &&
-          navigator.userActivation.isActive && this.setAttribute &&
-          mwGestureAuthorizes(this)) {
-        this.setAttribute('data-still-user-play', '');
+      gestured = !!(this.setAttribute && mwActivationActive() && mwGestureAuthorizes(this));
+      if (gestured) this.setAttribute('data-still-user-play', '');
+    } catch (e) {}
+    // Ungestured <video> playback is REFUSED here, in the page world, rather
+    // than paused after the fact by content.js's play listener. Two reasons.
+    // Reach: a prototype patch sees every <video>, including ones inside
+    // shadow roots, where content.js's document-level listeners and
+    // querySelectorAll are blind (nytimes.com's betamax web components are
+    // the canonical case — Still had zero effect on them). Shape: pausing
+    // AFTER the play event fights players that re-call play() whenever
+    // playback stops unexpectedly; measured on nytimes.com 2026-09-11, that
+    // fight is ~1,200 play() calls per scroll pass with the play button's
+    // `display` toggling ~120 times per 1.5s — a strobe, the opposite of
+    // what Still is for. Rejecting with NotAllowedError is exactly what the
+    // browser's own autoplay policy does, and players already handle it:
+    // they settle into their poster/paused state and stop retrying.
+    // Gated on stillOn() (state resolved + enabled + not allowlisted) — see
+    // the note above stillOn(). content.js's play listener stays as the
+    // backstop for pages whose CSP drops this world.
+    try {
+      if (this.tagName === 'VIDEO' && !gestured && stillOn() &&
+          !this.hasAttribute('data-still-user-play')) {
+        try { origMediaPause.call(this); } catch (e) {}
+        return Promise.reject(mwNotAllowed());
       }
     } catch (e) {}
     return origMediaPlay.apply(this, arguments);
   };
+  const origMediaPause = HTMLMediaElement.prototype.pause;
+  function mwNotAllowed() {
+    const msg = 'play() failed because the user didn\'t interact with the document first. (Still)';
+    try { return new DOMException(msg, 'NotAllowedError'); } catch (e) {
+      const err = new Error(msg); err.name = 'NotAllowedError'; return err;
+    }
+  }
+  // "A gesture happened recently": the browser's transient activation bit,
+  // OR a trusted pointer/key event seen by our own capture-phase listeners
+  // inside content.js's 2s window. The second half matters because the
+  // refusal must not be stricter than content.js's own gesture rule (a real
+  // click followed by an SPA navigation, or a document-level keyboard
+  // shortcut, authorizes a play in content.js and must here too), and it
+  // covers engines without navigator.userActivation. Scope still comes from
+  // mwGestureAuthorizes, so this never widens WHICH video a gesture unlocks.
+  function mwActivationActive() {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.userActivation &&
+          navigator.userActivation.isActive) return true;
+    } catch (e) {}
+    return mwRecentInput();
+  }
+  function mwRecentInput() {
+    const t = performance.now();
+    return (t - mwPointerAt < 2000) || (t - mwKeyAt < 2000);
+  }
+
+  // --- Shadow-root media guard ---
+  // Media events don't compose, so nothing dispatched on a <video> inside a
+  // shadow root ever reaches content.js's document-level play/loadstart
+  // listeners. The play() refusal above covers script-driven playback there;
+  // this covers the rest — an `autoplay` attribute the browser honours
+  // natively (no play() call), and the per-load user-play mark hygiene that
+  // content.js does for light-DOM videos. Any retry the player makes after
+  // our pause goes through play() and gets a clean refusal, so this cannot
+  // start the pause-after-play fight described above. Roots created before
+  // this patch ran (declarative shadow DOM) are not covered.
+  function guardShadowRoot(root) {
+    try {
+      root.addEventListener('play', function (e) {
+        const v = e.target;
+        if (!v || v.tagName !== 'VIDEO' || !stillOn()) return;
+        if (v.hasAttribute('data-still-user-play')) return;
+        if (mwActivationActive() && mwGestureAuthorizes(v)) {
+          try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
+          return;
+        }
+        try { origMediaPause.call(v); } catch (err) {}
+      }, true);
+      root.addEventListener('loadstart', function (e) {
+        const v = e.target;
+        if (!v || v.tagName !== 'VIDEO') return;
+        try { v.__stillMwLoadstartAt = performance.now(); } catch (err) {}
+        if (mwRecentInput()) return;
+        try { v.removeAttribute('data-still-user-play'); } catch (err) {}
+        if (!stillOn()) return;
+        try { origMediaPause.call(v); } catch (err) {}
+      }, true);
+    } catch (e) {}
+  }
+  const origAttachShadow = Element.prototype.attachShadow;
+  if (typeof origAttachShadow === 'function') {
+    Element.prototype.attachShadow = function () {
+      const root = origAttachShadow.apply(this, arguments);
+      guardShadowRoot(root);
+      return root;
+    };
+  }
 
   // --- Animated <canvas> freezing ---
   // Canvas animations (WebGL shaders, 2D particle fields, worker/OffscreenCanvas
