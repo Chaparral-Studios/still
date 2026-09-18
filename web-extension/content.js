@@ -1535,11 +1535,81 @@
   const motionRuns = new WeakMap();  // el -> run state
   const selfAnimators = new WeakSet();
   // Elements whose animation READS ITS OWN INLINE STYLE BACK each step
-  // (`el.style.left = parseFloat(el.style.left) + 10 + 'px'`). Withholding
-  // feeds such a loop our held value forever: it never advances and never
-  // reaches its end condition — a hand-rolled accordion never opens. Function
-  // beats calm, so once detected these are left alone for good.
+  // (`el.style.left = parseFloat(el.style.left) + 10 + 'px'`). Withholding by
+  // rewriting the inline value feeds such a loop our held value forever: it
+  // never advances and never reaches its end condition — a hand-rolled
+  // accordion never opens. For these the LOOK is held instead of the value: an
+  // `!important` stylesheet rule keyed by a data attribute pins what is
+  // rendered, while the inline style keeps whatever the page writes, so the
+  // loop reads its own numbers, runs to completion unseen, and the element
+  // pops to its destination when the writes stop. A loop that never ends (a
+  // marquee) simply stays frozen. motionExempt is only the fallback for
+  // elements a document-level rule cannot reach (inside a shadow root).
   const motionExempt = new WeakSet();
+  const readBackSteppers = new WeakSet();
+  let holdSeq = 0, holdStyleEl = null;
+  const holdRules = new Map(); // hold id -> rule text
+  function renderHoldRules() {
+    try {
+      if (!holdStyleEl || !holdStyleEl.isConnected) {
+        holdStyleEl = document.createElement('style');
+        holdStyleEl.id = '__still-hold';
+        (document.head || document.documentElement).appendChild(holdStyleEl);
+      }
+      holdStyleEl.textContent = [...holdRules.values()].join('\n');
+    } catch (e) {}
+  }
+  // Switch a run from "revert the inline value" to "pin the rendered look".
+  // `cur` is the page's own latest inline state, which is handed back to it.
+  function beginCssHold(el, run, cur) {
+    try {
+      if (el.getRootNode() !== document) return false;
+      if (!run.withholding) {
+        // Inline currently shows the page's newest frame; put the held look in
+        // place for a moment so it can be measured (never painted: this all
+        // happens inside one observer callback).
+        for (const p of run.props) {
+          const held = heldValueFor(run, p);
+          if (held && held[0]) el.style.setProperty(p, held[0], held[1]);
+          else el.style.removeProperty(p);
+        }
+      }
+      const cs = getComputedStyle(el);
+      const decls = [];
+      for (const p of run.props) {
+        const v = cs.getPropertyValue(p);
+        if (v) decls.push(p + ': ' + v + ' !important');
+      }
+      if (!decls.length) return false;
+      const id = String(++holdSeq);
+      holdRules.set(id, '[data-still-hold="' + id + '"] { ' + decls.join('; ') + '; }');
+      renderHoldRules();
+      el.setAttribute('data-still-hold', id);
+      el.setAttribute('data-still-motion', 'held');
+      // Give the page its own values back: from here on it reads what it wrote.
+      for (const p of run.props) {
+        const v = cur.get(p) || '';
+        if (v) el.style.setProperty(p, v, prioOf(cur, p));
+        else el.style.removeProperty(p);
+      }
+      run.cssHold = id;
+      run.withholding = false;
+      run.echo = null;
+      readBackSteppers.add(el);
+      selfAnimators.add(el);
+      styleSnaps.set(el, snapshotStyle(el));
+      return true;
+    } catch (e) { return false; }
+  }
+  function endCssHold(el, run) {
+    try {
+      holdRules.delete(run.cssHold);
+      renderHoldRules();
+      if (el.getAttribute('data-still-hold') === run.cssHold) el.removeAttribute('data-still-hold');
+      el.removeAttribute('data-still-motion');
+    } catch (e) {}
+    run.cssHold = null;
+  }
 
   // A page that repositions elements *in response to* scrolling — a virtualized
   // list (react-window and friends write `transform: translateY()` on rows as
@@ -1646,6 +1716,12 @@
   function landMotionRun(el, run) {
     motionRuns.delete(el);
     if (run.timer) { clearTimeout(run.timer); run.timer = null; }
+    if (run.cssHold) {
+      // The inline style already IS the destination; dropping the rule shows it.
+      endCssHold(el, run);
+      styleSnaps.set(el, snapshotStyle(el));
+      return;
+    }
     if (!run.withholding) return;
     try {
       for (const [p, [v, prio]] of run.virtual) {
@@ -1680,7 +1756,7 @@
     // is only being counted lives for MOTION_RUN_RESET_MS, so a slow stepper
     // can accumulate frames at all (it used to be torn down at 120ms, which
     // left MOTION_RUN_RESET_MS dead and anything under ~8fps undetected).
-    const ms = run.withholding
+    const ms = (run.withholding || run.cssHold)
       ? Math.min(MOTION_SETTLE_MAX_MS, Math.max(MOTION_SETTLE_MS, run.gap * 2.5))
       : MOTION_RUN_RESET_MS;
     run.timer = setTimeout(() => { landMotionRun(el, run); }, ms);
@@ -1734,9 +1810,20 @@
     if (motionExempt.has(el)) return false;
     const moving = motionPropsIn(changed);
     let run = motionRuns.get(el);
+    const now = performance.now();
+    if (run && run.cssHold) {
+      // Look pinned by stylesheet: the page's writes stay in the inline style
+      // untouched. Only keep the cadence, so the hold ends when they stop.
+      if (now - run.lastFrameAt >= MOTION_FRAME_GAP_MS) {
+        if (run.lastFrameAt !== -Infinity) run.gap = now - run.lastFrameAt;
+        run.lastFrameAt = now;
+      }
+      run.lastAt = now;
+      armMotionSettle(el, run);
+      return false;
+    }
     const withholding = !!(run && run.withholding);
     if (!withholding && !moving.length) { motionRuns.delete(el); return false; }
-    const now = performance.now();
     // The user is dragging. Hand the element straight back, at the position
     // the page last asked for, or it sticks under their finger. A run that was
     // already being withheld BEFORE the press is not the thing being dragged —
@@ -1745,6 +1832,16 @@
       if (run) landMotionRun(el, run);
       motionRuns.delete(el);
       return false;
+    }
+
+    // A known read-back stepper starting a new run (the accordion closing
+    // again): pin the look from its very first write — nothing paints.
+    if (!withholding && moving.length && readBackSteppers.has(el) &&
+        (!run || now - run.lastAt > MOTION_RUN_RESET_MS)) {
+      const fresh = newMotionRun(el, prev, moving, now);
+      fresh.lastFrameAt = now;
+      if (beginCssHold(el, fresh, cur)) { armMotionSettle(el, fresh); return false; }
+      motionRuns.delete(el);
     }
 
     // Scroll-response writes pass through (see above) unless the element is a
@@ -1823,6 +1920,10 @@
       if (differsFromHeld && key === run.starveKey) run.starve++;
       else { run.starve = 0; run.starveKey = key; }
       if (run.starve >= STARVE_FRAMES) {
+        // Hold the look by stylesheet and hand the inline values back. Only
+        // where a document rule cannot reach (shadow roots) does the element
+        // fall back to being left alone — function still beats calm there.
+        if (beginCssHold(el, run, cur)) { armMotionSettle(el, run); return false; }
         motionExempt.add(el);
         selfAnimators.delete(el);
         landMotionRun(el, run);
@@ -1878,6 +1979,9 @@
         el.removeAttribute('data-still-motion');
         motionRuns.delete(el);
       });
+      // No look-hold may outlive a disable, even one whose run was lost.
+      document.querySelectorAll('[data-still-hold]').forEach((el) => el.removeAttribute('data-still-hold'));
+      if (holdRules.size) { holdRules.clear(); renderHoldRules(); }
     } catch (e) {}
   }
 
@@ -2218,6 +2322,7 @@
       },
       isSelfAnimator: (el) => selfAnimators.has(el),
       isMotionExempt: (el) => motionExempt.has(el),
+      isReadBackStepper: (el) => readBackSteppers.has(el),
       releaseAllMotion,
       isVideoPreviewToBlock, blockVideoPreview, pauseVideos, handleVideo,
       coverShadowRoot, shadowRootCovered, liveCoveredRoots,
