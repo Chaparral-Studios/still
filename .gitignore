@@ -26,3 +26,4 @@ tests/motion/.verify-userdata/
 
 # motion sweep site lists (browser history)
 tests/motion/sites-*.txt
+tests/motion/sweep-sites.json
