@@ -175,10 +175,24 @@ const PAGE = `<!doctype html><html><head><style>
 
     // A virtualized list: repositions ONLY in response to scroll events, and
     // stops the instant scrolling does. Must keep working.
+    // A virtualized list: the wrapper's offset is rewritten as the window of
+    // rendered rows changes — together with the rows themselves being swapped.
     window.virtualize = (id) => {
       const el = document.getElementById(id);
       window.addEventListener('scroll', () => {
+        el.textContent = '';
+        const first = Math.floor(window.scrollY / 20);
+        for (let i = 0; i < 3; i++) { const row = document.createElement('div'); row.textContent = 'row ' + (first + i); el.appendChild(row); }
         el.style.transform = 'translateY(' + Math.round(window.scrollY) + 'px)';
+      }, { passive: true });
+    };
+    // Scroll-linked DECORATION: same kind of write, but nothing about the
+    // element's content changes (JS sticky header, parallax layer, scrub reveal).
+    window.scrollDecor = (id) => {
+      const el = document.getElementById(id);
+      window.addEventListener('scroll', () => {
+        el.style.transform = 'translateY(' + Math.round(window.scrollY * 0.5) + 'px)';
+        el.style.opacity = String(Math.min(1, 0.2 + window.scrollY / 400));
       }, { passive: true });
     };
   </script>
@@ -282,7 +296,7 @@ test.describe('JS-driven motion is withheld', () => {
 
   // Scroll-response repositioning must survive: freezing a virtualized list
   // mid-scroll strands rows and leaves blanks, which reads as broken.
-  test('scroll-driven repositioning is left alone while scrolling', async ({ page }) => {
+  test('virtualized-list placement (offset write + content swap) is left alone while scrolling', async ({ page }) => {
     await setup(page);
     await page.evaluate(() => window.virtualize('vlist'));
     await page.mouse.move(200, 300);
@@ -293,6 +307,35 @@ test.describe('JS-driven motion is withheld', () => {
       return { written: m ? Math.round(Number(m[1])) : null, scrollY: Math.round(window.scrollY) };
     });
     expect(offset.written).toBe(offset.scrollY);
+  });
+
+  test('scroll-linked decoration (parallax / scrub / JS sticky) paints nothing while scrolling and lands once when it stops', async ({ page }) => {
+    await setup(page);
+    await page.evaluate(() => {
+      const el = document.getElementById('vlist');
+      window.scrollDecor('vlist');
+      const base = el.offsetTop;
+      window.__decor = []; window.__decorOn = true;
+      (function s() {
+        const top = Math.round(el.getBoundingClientRect().top + window.scrollY - base);
+        window.__decor.push(top + '/' + (+getComputedStyle(el).opacity).toFixed(2));
+        if (window.__decorOn) requestAnimationFrame(s);
+      })();
+    });
+    await page.mouse.move(200, 300);
+    for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, 60); await page.waitForTimeout(60); }
+    const during = await page.evaluate(() => [...new Set(window.__decor)]);
+    await page.waitForTimeout(700);
+    const r = await page.evaluate(() => {
+      window.__decorOn = false;
+      const el = document.getElementById('vlist');
+      return { states: [...new Set(window.__decor)], scrollY: Math.round(window.scrollY), tf: el.style.transform, withheld: window.__still.isMotionWithheld(el) };
+    });
+    expect(r.scrollY).toBeGreaterThan(400);
+    expect(during.length).toBe(1);                 // held in its starting look for the whole scroll
+    expect(r.states.length).toBe(2);               // …then one step to the destination
+    expect(r.tf).toBe('translateY(' + Math.round(r.scrollY * 0.5) + 'px)');
+    expect(r.withheld).toBe(false);
   });
 
   // ...but an element that keeps animating after the wheel goes quiet has
