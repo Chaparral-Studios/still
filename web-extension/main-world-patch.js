@@ -622,23 +622,36 @@
   // finished promise rejects, no animationend fires, and the chain stops with
   // the element in its resting style. (StopTheMadness's "Protect animation
   // end" exists for the same reason.)
-  const MW_BURST_N = 4, MW_BURST_MS = 1000;
-  const mwBursts = new WeakMap(); // target el -> { n, t0 }
+  // Two tiers, counting only genuine new starts (see content.js inBurst): a
+  // same-task tier for finished-promise chains that spin in microtasks, and a
+  // per-second tier for animationend-restart loops — set above legitimate
+  // rapid UI (an upload bar calling animate() on every progress event, ~10/s,
+  // froze at its 4th value under the old 4-per-second limit).
+  const MW_BURST_TASK_N = 8, MW_BURST_N = 20, MW_BURST_MS = 1000;
+  const mwBursts = new WeakMap(); // target el -> { n, t0, taskN, epoch }
+  const mwSetTimeout = window.setTimeout.bind(window);
+  let mwBurstEpoch = 0, mwBurstEpochArmed = false;
   function mwInBurst(a) {
     try {
       const el = a.effect && a.effect.target;
       if (!el) return false;
+      if (!mwBurstEpochArmed) {
+        mwBurstEpochArmed = true;
+        mwSetTimeout(function () { mwBurstEpoch++; mwBurstEpochArmed = false; }, 0);
+      }
       const t = performance.now();
       let b = mwBursts.get(el);
-      if (!b || t - b.t0 > MW_BURST_MS) { b = { n: 0, t0: t }; mwBursts.set(el, b); }
-      b.n++;
-      return b.n > MW_BURST_N;
+      if (!b || t - b.t0 > MW_BURST_MS) { b = { n: 0, t0: t, taskN: 0, epoch: mwBurstEpoch }; mwBursts.set(el, b); }
+      if (b.epoch !== mwBurstEpoch) { b.epoch = mwBurstEpoch; b.taskN = 0; }
+      b.n++; b.taskN++;
+      return b.taskN > MW_BURST_TASK_N || b.n > MW_BURST_N;
     } catch (e) { return false; }
   }
   function mwNeutralizeAnimation(a) {
     // Mirror of content.js neutralizeAnimation: infinite → cancel (no end
     // state to show); finite → fill:forwards + finish (snap to the end).
     try {
+      if (a.playState === 'finished') return; // already snapped; don't count it
       const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
         ? a.effect.getComputedTiming() : null;
       if ((timing && timing.iterations === Infinity) || mwInBurst(a)) {

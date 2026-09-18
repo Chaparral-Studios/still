@@ -1612,21 +1612,41 @@
   // finished promise rejects, no animationend fires, and the chain stops with
   // the element in its resting style. (StopTheMadness's "Protect animation
   // end" exists for the same reason.)
-  const BURST_N = 4, BURST_MS = 1000;
-  const bursts = new WeakMap(); // target el -> { n, t0 }
+  // Two tiers, both counting only GENUINE new starts (neutralizeAnimation
+  // returns early for an already-finished animation, so the repeated timed /
+  // mutation-driven passes over the same snapped animation never count — they
+  // used to, and a plain `opacity:0; animation: fadeIn 1s forwards` hero got
+  // cancel()ed back to invisible after five passes inside a second):
+  //  - same task: a finished-promise chain spins in microtasks, so more than
+  //    BURST_TASK_N starts on one element before a macrotask runs is a spin;
+  //  - per second: an animationend-restart loop yields a frame each lap, so it
+  //    needs a time window — set well above legitimate rapid UI (a progress
+  //    bar animating on every progress event runs ~10/s).
+  const BURST_TASK_N = 8, BURST_N = 20, BURST_MS = 1000;
+  const bursts = new WeakMap(); // target el -> { n, t0, taskN, epoch }
+  let burstEpoch = 0, burstEpochArmed = false;
   function inBurst(a) {
     try {
       const el = a.effect && a.effect.target;
       if (!el) return false;
+      if (!burstEpochArmed) {
+        burstEpochArmed = true;
+        setTimeout(() => { burstEpoch++; burstEpochArmed = false; }, 0);
+      }
       const t = performance.now();
       let b = bursts.get(el);
-      if (!b || t - b.t0 > BURST_MS) { b = { n: 0, t0: t }; bursts.set(el, b); }
-      b.n++;
-      return b.n > BURST_N;
+      if (!b || t - b.t0 > BURST_MS) { b = { n: 0, t0: t, taskN: 0, epoch: burstEpoch }; bursts.set(el, b); }
+      if (b.epoch !== burstEpoch) { b.epoch = burstEpoch; b.taskN = 0; }
+      b.n++; b.taskN++;
+      return b.taskN > BURST_TASK_N || b.n > BURST_N;
     } catch (e) { return false; }
   }
   function neutralizeAnimation(a) {
     try {
+      // Already snapped to its end (by us, or naturally): nothing to do, and it
+      // must not feed the burst counter — fill:forwards keeps a finished
+      // animation in getAnimations(), so every later pass sees it again.
+      if (a.playState === 'finished') return;
       const timing = a.effect && typeof a.effect.getComputedTiming === 'function'
         ? a.effect.getComputedTiming()
         : null;

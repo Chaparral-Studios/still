@@ -194,10 +194,44 @@ test.describe('shadow-root and late-WAAPI animation coverage', () => {
     ]);
     expect(r).not.toBe('hung');
     expect(Date.now() - t0).toBeLessThan(1000);
-    expect(r.waapi).toBeLessThanOrEqual(6);
-    expect(r.css).toBeLessThanOrEqual(6);
+    // Same-task tier stops the WAAPI chain (8 + the cancelled one); the
+    // animationend loop yields a frame per lap, so the per-second tier ends it.
+    expect(r.waapi).toBeLessThanOrEqual(10);
+    expect(r.css).toBeLessThanOrEqual(24);
     expect(await moving(page, 'doc', 'w-light')).toBe(false);
     expect(await moving(page, 'open', 'w')).toBe(false);
+  });
+
+  test('repeated passes over an already-finished entrance animation never revert it (invisible-hero regression)', async ({ page }) => {
+    await setup(page);
+    const r = await page.evaluate(async () => {
+      const st = document.createElement('style');
+      st.textContent = '@keyframes heroIn{from{opacity:0}to{opacity:1}} #hero{opacity:0;animation:heroIn 1s forwards}';
+      document.head.appendChild(st);
+      const el = document.createElement('h1'); el.id = 'hero'; el.textContent = 'hero'; document.body.appendChild(el);
+      await new Promise((res) => setTimeout(res, 60));
+      // The real page gets this from init + load + the 500ms pass + every
+      // mutation-triggered scan, all inside one second.
+      for (let i = 0; i < 10; i++) window.__still.cancelAnimations();
+      return { opacity: getComputedStyle(el).opacity, states: el.getAnimations().map((a) => a.playState) };
+    });
+    expect(r.opacity).toBe('1');
+    expect(r.states).toEqual(['finished']);
+  });
+
+  test('rapid legitimate animate() calls on one element all land (progress-bar regression)', async ({ page }) => {
+    await setup(page);
+    await page.waitForTimeout(300);
+    const width = await page.evaluate(async () => {
+      const bar = document.createElement('div'); bar.style.cssText = 'height:10px;width:0;background:#36c';
+      const wrap = document.createElement('div'); wrap.style.width = '400px'; wrap.appendChild(bar); document.body.appendChild(wrap);
+      for (let p = 0; p < 100; p += 10) {
+        bar.animate([{ width: p + '%' }, { width: (p + 10) + '%' }], { duration: 150, fill: 'forwards' });
+        await new Promise((res) => setTimeout(res, 60));
+      }
+      return getComputedStyle(bar).width;
+    });
+    expect(width).toBe('400px');
   });
 
   test('a component that reassigns adoptedStyleSheets after attach (Lit pattern) stays covered', async ({ page }) => {
