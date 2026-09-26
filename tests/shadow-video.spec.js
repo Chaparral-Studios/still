@@ -240,3 +240,58 @@ test.describe('shadow-DOM video (nytimes betamax pattern)', () => {
     expect(s.rejections[0]).toBe('NotAllowedError');
   });
 });
+
+// A finger that scrolls the page is not a tap on the video it happened to
+// start over. On a phone every flick begins with a touchstart, and a feed
+// video fills the screen width, so this is the common case, not the edge:
+// nytimes.com on iOS (report 2026-09-21) played its feed video under the
+// scroll, and with a pause-on-play blocker alongside the retry loop strobed
+// the poster and play button — the flicker the refusal was meant to end.
+test.describe('touch scrolling over a shadow-DOM video', () => {
+  test.use({ hasTouch: true });
+
+  // Park the page so the player (page y 2400–2640) is mostly below the fold:
+  // less than half visible, so the IntersectionObserver has not fired yet.
+  const park = (page) => page.evaluate(() => window.scrollTo(0, 1750));
+
+  test('a flick that starts on the player does not authorize its autoplay', async ({ page }) => {
+    await setup(page);
+    await park(page);
+    await page.waitForTimeout(300);
+    expect((await state(page)).playCalls).toBe(0);
+    // Real synthesized touch scroll: touchstart at viewport (160, 680) —
+    // page y 2430, inside the player's rect — then the finger drags up and
+    // the player scrolls into view, which triggers the IO play().
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.synthesizeScrollGesture', {
+      x: 160, y: 680, yDistance: -400, gestureSourceType: 'touch', speed: 800,
+    });
+    await page.waitForFunction(() => window.__stats.playCalls > 0, null, { timeout: 5000 });
+    await page.waitForTimeout(1500);
+
+    const s = await state(page);
+    expect(s.paused).toBe(true);
+    expect(s.userPlayMark).toBe(false);
+    expect(s.rejections[0]).toBe('NotAllowedError');
+    expect(s.playEvents).toBe(0);
+    expect(s.btnToggles).toBeLessThanOrEqual(1);
+  });
+
+  test('a tap on the play button still plays', async ({ page }) => {
+    await setup(page);
+    await scrollToPlayer(page);
+    await page.waitForTimeout(500);
+    const box = await page.evaluate(() => {
+      const r = document.getElementById('host').shadowRoot.getElementById('btn').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.touchscreen.tap(box.x, box.y);
+    await page.waitForFunction(() => !window.__vid.paused, null, { timeout: 5000 });
+    await page.waitForTimeout(600);
+
+    const s = await state(page);
+    expect(s.paused).toBe(false);
+    expect(s.userPlayMark).toBe(true);
+    expect(s.currentTime).toBeGreaterThan(0.2);
+  });
+});
