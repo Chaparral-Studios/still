@@ -409,6 +409,21 @@
   var mwPointerAt = -Infinity, mwPointerX = 0, mwPointerY = 0, mwKeyAt = -Infinity;
   var mwPointerHref = '';
   var MW_CLICK_PAD_PX = 40;
+  // A touch that turns into a SCROLL is not a tap on whatever it started
+  // over. On a phone every flick begins with a touchstart, and a feed video
+  // fills the screen width, so the finger routinely lands on one — and the
+  // 2s window then authorized the player's next IntersectionObserver play()
+  // as if the user had tapped the video (nytimes.com, iOS Safari, report
+  // 2026-09-21: the video played under the scroll, and with a pause-on-play
+  // blocker alongside — StopTheMadness — the player's retry loop strobed the
+  // poster and play button, ~200 toggles per 1.5s while scrolling back up
+  // over it). Once the finger has moved past tap slop, or the browser takes
+  // the gesture over for scrolling (pointercancel), the recorded POINT is
+  // voided so it authorizes nothing; the TIME is kept, so the loadstart
+  // hygiene rule is unchanged. A tap never moves, so taps still authorize.
+  var MW_TAP_SLOP_PX = 12;
+  var mwTouchX0 = 0, mwTouchY0 = 0;
+  function mwVoidPointer() { mwPointerX = NaN; mwPointerY = NaN; }
   try {
     document.addEventListener('pointerdown', function (e) {
       if (e.isTrusted === false) return;
@@ -422,9 +437,24 @@
       if (e.isTrusted === false) return;
       mwPointerAt = performance.now();
       var t = e.touches && e.touches[0];
-      if (t) { mwPointerX = t.clientX + window.scrollX; mwPointerY = t.clientY + window.scrollY; }
+      if (t) {
+        mwPointerX = t.clientX + window.scrollX; mwPointerY = t.clientY + window.scrollY;
+        mwTouchX0 = t.clientX; mwTouchY0 = t.clientY;
+      }
       mwPointerHref = location.href;
     }, { capture: true, passive: true });
+    document.addEventListener('touchmove', function (e) {
+      if (e.isTrusted === false) return;
+      var t = e.touches && e.touches[0];
+      if (t && (Math.abs(t.clientX - mwTouchX0) > MW_TAP_SLOP_PX ||
+                Math.abs(t.clientY - mwTouchY0) > MW_TAP_SLOP_PX)) mwVoidPointer();
+    }, { capture: true, passive: true });
+    ['touchcancel', 'pointercancel'].forEach(function (type) {
+      document.addEventListener(type, function (e) {
+        if (e.isTrusted === false) return;
+        mwVoidPointer();
+      }, { capture: true, passive: true });
+    });
   } catch (e) {}
   try {
     document.addEventListener('keydown', function (e) {

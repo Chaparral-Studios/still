@@ -1177,6 +1177,13 @@
     lastPointerHref = location.href;
   };
   let lastKeyAt = -Infinity;
+  // A touch that becomes a scroll is not a tap on what it started over (see
+  // the same rule in main-world-patch.js: a flick beginning on a feed video
+  // used to authorize its next autoplay). Past tap slop, or once the browser
+  // takes the gesture for scrolling, the point is voided; the time is kept.
+  const TAP_SLOP_PX = 12;
+  let touchX0 = 0, touchY0 = 0;
+  const voidPointer = () => { lastPointerX = NaN; lastPointerY = NaN; };
   try {
     document.addEventListener('pointerdown', (e) => recordPointer(e.clientX, e.clientY),
       { capture: true, passive: true });
@@ -1185,7 +1192,16 @@
     document.addEventListener('touchstart', (e) => {
       const t = e.touches && e.touches[0];
       recordPointer(t ? t.clientX : 0, t ? t.clientY : 0);
+      touchX0 = t ? t.clientX : 0; touchY0 = t ? t.clientY : 0;
     }, { capture: true, passive: true });
+    document.addEventListener('touchmove', (e) => {
+      const t = e.touches && e.touches[0];
+      if (t && (Math.abs(t.clientX - touchX0) > TAP_SLOP_PX ||
+                Math.abs(t.clientY - touchY0) > TAP_SLOP_PX)) voidPointer();
+    }, { capture: true, passive: true });
+    ['touchcancel', 'pointercancel'].forEach((type) => {
+      document.addEventListener(type, voidPointer, { capture: true, passive: true });
+    });
   } catch (e) {}
   try {
     document.addEventListener('keydown', (e) => {

@@ -1,0 +1,43 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>betamax mock</title>
+<style>body{margin:0;font-family:Georgia,serif} .story{padding:16px;border-bottom:1px solid #ddd} h2{margin:0 0 6px} p{margin:0;color:#444}</style></head>
+<body>
+<script>
+// Minimal model of a feed video web component: shadow root, muted inline
+// <video>, a poster/cover, IntersectionObserver-driven play(), and a player
+// that treats any pause it did not ask for as a glitch and calls play() again.
+class MockFeedVideo extends HTMLElement {
+  constructor() {
+    super();
+    const r = this.attachShadow({ mode: 'open' });
+    r.innerHTML = `<style>:host{display:block;position:relative;background:#000} video{width:100%;display:block}
+      .cover{position:absolute;inset:0;background:#123 url() center/cover;display:flex;align-items:center;justify-content:center;color:#fff;font:20px sans-serif}
+      .btn{position:absolute;left:12px;bottom:12px;width:44px;height:44px;border-radius:50%;background:#fff}</style>
+      <video muted playsinline loop preload="auto" src="/fixtures/test-video.webm"></video><div class="cover">POSTER</div><div class="btn"></div>`;
+    this.v = r.querySelector('video'); this.cover = r.querySelector('.cover'); this.btn = r.querySelector('.btn');
+    this.inView = false; this.userPaused = false; this.blocked = false;
+    this.v.addEventListener('play', () => { this.cover.style.display = 'none'; this.btn.style.display = 'none'; });
+    this.v.addEventListener('pause', () => {
+      this.cover.style.display = ''; this.btn.style.display = '';
+      if (this.inView && !this.userPaused && !this.blocked) setTimeout(() => this.tryPlay(), 16);
+    });
+    window.__mockPlays = 0; window.__mockRejects = 0;
+  }
+  tryPlay() {
+    if (!this.inView || this.userPaused) return;
+    window.__mockPlays++;
+    const p = this.v.play();
+    if (p && p.catch) p.catch((e) => { window.__mockRejects++; if (e && e.name === 'NotAllowedError') { this.blocked = true; this.cover.textContent = 'POSTER (autoplay blocked)'; } });
+  }
+  connectedCallback() {
+    new IntersectionObserver((es) => { for (const e of es) { this.inView = e.isIntersecting && e.intersectionRatio >= 0.5; if (this.inView) { this.blocked = false; this.tryPlay(); } else this.v.pause(); } }, { threshold: [0, 0.5, 1] }).observe(this);
+  }
+}
+customElements.define('mock-feed-video', MockFeedVideo);
+const story = (i) => `<div class="story"><h2>Story ${i}</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco.</p></div>`;
+let html = '';
+for (let i = 1; i <= 8; i++) html += story(i);
+html += '<mock-feed-video style="height:420px"></mock-feed-video>';
+for (let i = 9; i <= 24; i++) html += story(i);
+document.write(html);
+</script>
+</body></html>
