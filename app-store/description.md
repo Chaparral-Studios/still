@@ -6,6 +6,10 @@ What it blocks:
 • CSS transitions that create subliminal smooth motion (carousel crossfades, opacity pulses, sliding banners)
 • CSS background-image animations
 • SVG animations
+• Autoplaying video — videos stay paused until you tap play, and scrolling past a video never counts as a tap
+• Video on X (x.com and twitter.com) — never plays at all, not even on a tap
+• Animated canvas and WebGL graphics — frozen once they start redrawing continuously; games and maps you click into keep working
+• Scroll-linked and JavaScript-driven motion — parallax, scroll effects and sliding carousels hold still
 • JavaScript-driven page-load flourishes — jQuery `.animate` sweep effects, "curtain bar" reveals, and similar attention-grabbing intros
 • Per-site rule pack — sites with known animation patterns (e.g. president.mit.edu's hero curtain) get tailored protection without breaking the rest of the page
 
