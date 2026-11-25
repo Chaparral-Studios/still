@@ -34,7 +34,7 @@ const PAGE = `<!doctype html><html><body style="margin:0">
   </script>
 </body></html>`;
 
-async function setup(page, origin) {
+async function setup(page, origin, { storageDelayMs = 0 } = {}) {
   await page.route(origin + '/**', (route) => {
     const u = new URL(route.request().url());
     if (u.pathname === '/test-video.webm') {
@@ -42,20 +42,23 @@ async function setup(page, origin) {
     }
     return route.fulfill({ status: 200, contentType: 'text/html', body: PAGE });
   });
-  await page.addInitScript(() => {
+  await page.addInitScript((delay) => {
+    const answer = (cb) => cb({ enabled: true, allowlist: [] });
     window.browser = {
-      storage: { local: { get(keys, cb) { cb({ enabled: true, allowlist: [] }); }, set() {} } },
+      storage: { local: { get(keys, cb) {
+        if (delay) setTimeout(() => answer(cb), delay); else answer(cb);
+      }, set() {} } },
       runtime: {
         onMessage: { addListener() {} },
         sendMessage() { return Promise.resolve(); },
         getURL(p) { return 'http://127.0.0.1:1/' + p; }
       }
     };
-  });
+  }, storageDelayMs);
   await page.goto(origin + '/home');
   await page.addScriptTag({ path: MAIN_WORLD_PATCH });
   await page.addScriptTag({ path: CONTENT_SCRIPT });
-  await page.waitForTimeout(200);
+  if (!storageDelayMs) await page.waitForTimeout(200);
 }
 
 const states = (page, ids) => page.evaluate((ids) => ids.map((id) => {
@@ -96,6 +99,24 @@ for (const host of ['https://x.com', 'https://mobile.twitter.com']) {
       const [s] = await states(page, ['tl']);
       expect(s.paused).toBe(true);
       expect(s.t).toBeLessThan(0.3);
+    });
+
+    test('nothing plays before storage has answered (cold load)', async ({ page }) => {
+      await setup(page, host, { storageDelayMs: 3000 });
+      // Script autoplay and native autoplay, both while storage is still out.
+      await page.evaluate(() => {
+        const tl = document.getElementById('tl');
+        setTimeout(() => tl.play().catch(() => {}), 0);
+        const v = document.createElement('video');
+        v.id = 'auto'; v.muted = true; v.autoplay = true;
+        v.setAttribute('playsinline', ''); v.src = '/test-video.webm?auto';
+        document.body.appendChild(v);
+      });
+      await page.waitForTimeout(1000);
+      for (const s of await states(page, ['tl', 'auto'])) {
+        expect(s.paused).toBe(true);
+        expect(s.t).toBeLessThan(0.3);
+      }
     });
   });
 }

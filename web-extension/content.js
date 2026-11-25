@@ -1223,10 +1223,17 @@
   const NO_PLAY_HOSTS = ['x.com', 'twitter.com'];
   const noPlayHost = (() => {
     try {
-      const h = location.hostname;
+      const h = location.hostname.replace(/\.$/, '');
       return NO_PLAY_HOSTS.some((d) => h === d || h.endsWith('.' + d));
     } catch (e) { return false; }
   })();
+  // Whether the play/loadstart listeners pause. Before storage resolves this
+  // is normally off (init()'s first scanAll covers that window), but on a
+  // no-play host it fails closed: a cold load of an x.com post must not play
+  // a single frame while storage.local.get is still out.
+  function videoPauseOn() {
+    return initialized ? (enabled && !siteAllowed) : noPlayHost;
+  }
 
   function gestureAuthorizesPlay(v) {
     if (noPlayHost) return false;
@@ -1276,10 +1283,10 @@
       try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
       return;
     }
-    // No recent gesture: script-driven autoplay. `initialized` gates the few
-    // ms before storage resolves (init()'s first scanAll covers that window);
-    // enabled/siteAllowed are re-checked live for the mid-page disable case.
-    if (!initialized || !enabled || siteAllowed) return;
+    // No recent gesture: script-driven autoplay. videoPauseOn() gates the few
+    // ms before storage resolves (except on no-play hosts); enabled and
+    // siteAllowed are re-checked live for the mid-page disable case.
+    if (!videoPauseOn()) return;
     if (!noPlayHost && v.hasAttribute('data-still-user-play')) return;
     try { v.pause(); } catch (err) {}
   }, true);
@@ -1309,7 +1316,7 @@
     try { v.__stillLoadstartAt = performance.now(); } catch (err) {}
     if (recentGesture() && !noPlayHost) return;
     try { v.removeAttribute('data-still-user-play'); } catch (err) {}
-    if (!initialized || !enabled || siteAllowed) return;
+    if (!videoPauseOn()) return;
     try { v.pause(); } catch (err) {}
   }, true);
 
