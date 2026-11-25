@@ -470,7 +470,27 @@
       }
     }, true);
   } catch (e) {}
+  // Hosts where no video ever plays, not even on a tap (user request
+  // 2026-11-25, x.com on iPhone: opening a post started its video and the
+  // reply videos, and an accidental tap on a video is no more welcome). The
+  // per-site toggle in the popup still lifts it, via stillOn(). Keep in step
+  // with NO_PLAY_HOSTS in content.js.
+  var MW_NO_PLAY_HOSTS = ['x.com', 'twitter.com'];
+  var mwNoPlayHost = (function () {
+    try {
+      var h = location.hostname.replace(/\.$/, '');
+      return MW_NO_PLAY_HOSTS.some(function (d) { return h === d || h.slice(-(d.length + 1)) === '.' + d; });
+    } catch (e) { return false; }
+  })();
+  // Video refusal is on: stillOn() everywhere, and on no-play hosts also in
+  // the window before content.js has read storage (fail closed: a cold load of
+  // an x.com post must not play a frame). Only data-still-off — disabled or
+  // allowlisted, known for sure — lifts it there.
+  function mwPlayBlockOn() {
+    return stillOn() || (mwNoPlayHost && !stillOff());
+  }
   function mwGestureAuthorizes(v) {
+    if (mwNoPlayHost) return false;
     // Every activation-granting input (pointerdown/touch tap/non-Escape
     // keydown) also hits our capture-phase listeners, so "isActive with no
     // gesture recorded" shouldn't happen — fail closed if it somehow does;
@@ -542,8 +562,8 @@
     // the note above stillOn(). content.js's play listener stays as the
     // backstop for pages whose CSP drops this world.
     try {
-      if (this.tagName === 'VIDEO' && !gestured && stillOn() &&
-          !this.hasAttribute('data-still-user-play')) {
+      if (this.tagName === 'VIDEO' && !gestured && mwPlayBlockOn() &&
+          (mwNoPlayHost || !this.hasAttribute('data-still-user-play'))) {
         try { origMediaPause.call(this); } catch (e) {}
         return Promise.reject(mwNotAllowed());
       }
@@ -591,8 +611,8 @@
     try {
       root.addEventListener('play', function (e) {
         const v = e.target;
-        if (!v || v.tagName !== 'VIDEO' || !stillOn()) return;
-        if (v.hasAttribute('data-still-user-play')) return;
+        if (!v || v.tagName !== 'VIDEO' || !mwPlayBlockOn()) return;
+        if (!mwNoPlayHost && v.hasAttribute('data-still-user-play')) return;
         if (mwActivationActive() && mwGestureAuthorizes(v)) {
           try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
           return;
@@ -603,9 +623,9 @@
         const v = e.target;
         if (!v || v.tagName !== 'VIDEO') return;
         try { v.__stillMwLoadstartAt = performance.now(); } catch (err) {}
-        if (mwRecentInput()) return;
+        if (mwRecentInput() && !mwNoPlayHost) return;
         try { v.removeAttribute('data-still-user-play'); } catch (err) {}
-        if (!stillOn()) return;
+        if (!mwPlayBlockOn()) return;
         try { origMediaPause.call(v); } catch (err) {}
       }, true);
     } catch (e) {}

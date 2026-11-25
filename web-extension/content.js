@@ -1215,7 +1215,28 @@
     return now - lastPointerAt < GESTURE_WINDOW_MS || now - lastKeyAt < GESTURE_WINDOW_MS;
   }
 
+  // Hosts where no video ever plays, not even on a tap (user request
+  // 2026-11-25, x.com on iPhone: opening a post started its video and the
+  // reply videos via the SPA rule below, and an accidental tap on a video is
+  // no more welcome). The per-site toggle in the popup still lifts it
+  // (siteAllowed). Keep in step with MW_NO_PLAY_HOSTS in main-world-patch.js.
+  const NO_PLAY_HOSTS = ['x.com', 'twitter.com'];
+  const noPlayHost = (() => {
+    try {
+      const h = location.hostname.replace(/\.$/, '');
+      return NO_PLAY_HOSTS.some((d) => h === d || h.endsWith('.' + d));
+    } catch (e) { return false; }
+  })();
+  // Whether the play/loadstart listeners pause. Before storage resolves this
+  // is normally off (init()'s first scanAll covers that window), but on a
+  // no-play host it fails closed: a cold load of an x.com post must not play
+  // a single frame while storage.local.get is still out.
+  function videoPauseOn() {
+    return initialized ? (enabled && !siteAllowed) : noPlayHost;
+  }
+
   function gestureAuthorizesPlay(v) {
+    if (noPlayHost) return false;
     const now = performance.now();
     if (now - lastKeyAt < GESTURE_WINDOW_MS) return true;
     if (now - lastPointerAt >= GESTURE_WINDOW_MS) return false;
@@ -1262,11 +1283,11 @@
       try { v.setAttribute('data-still-user-play', ''); } catch (err) {}
       return;
     }
-    // No recent gesture: script-driven autoplay. `initialized` gates the few
-    // ms before storage resolves (init()'s first scanAll covers that window);
-    // enabled/siteAllowed are re-checked live for the mid-page disable case.
-    if (!initialized || !enabled || siteAllowed) return;
-    if (v.hasAttribute('data-still-user-play')) return;
+    // No recent gesture: script-driven autoplay. videoPauseOn() gates the few
+    // ms before storage resolves (except on no-play hosts); enabled and
+    // siteAllowed are re-checked live for the mid-page disable case.
+    if (!videoPauseOn()) return;
+    if (!noPlayHost && v.hasAttribute('data-still-user-play')) return;
     try { v.pause(); } catch (err) {}
   }, true);
 
@@ -1293,14 +1314,14 @@
     // Stamp before any early return: gestureAuthorizesPlay's SPA rule needs
     // the load time of gestured loads too.
     try { v.__stillLoadstartAt = performance.now(); } catch (err) {}
-    if (recentGesture()) return;
+    if (recentGesture() && !noPlayHost) return;
     try { v.removeAttribute('data-still-user-play'); } catch (err) {}
-    if (!initialized || !enabled || siteAllowed) return;
+    if (!videoPauseOn()) return;
     try { v.pause(); } catch (err) {}
   }, true);
 
   function handleVideo(v) {
-    if (!v.hasAttribute('data-still-user-play')) {
+    if (noPlayHost || !v.hasAttribute('data-still-user-play')) {
       try { v.pause(); } catch (e) {}
     }
     if (isVideoPreviewToBlock(v)) blockVideoPreview(v);
